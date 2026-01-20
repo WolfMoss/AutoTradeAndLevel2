@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>ATASOrderFlowExporter</AssemblyName>
+    <RootNamespace>ATASOrderFlowExporter</RootNamespace>
+    <Version>1.0.0</Version>
+    <Authors>Custom</Authors>
+    <Description>ATAS订单流K线数据导出指标</Description>
+    
+    <!-- ATAS输出目录 -->
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <!-- ATAS Platform引用 -->
+  <!-- 请确保ATAS Platform已安装到默认路径，或修改以下路径 -->
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="OFT.Attributes">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Attributes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Core">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Utils.Common">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\Utils.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 仅用于开发时的调试 -->
+  <ItemGroup>
+    <PackageReference Include="System.ComponentModel.Annotations" Version="5.0.0" />
+  </ItemGroup>
+
+  <!-- 发布时复制到ATAS指标目录 -->
+  <Target Name="CopyToATAS" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Message Text="正在复制到ATAS指标目录..." Importance="high" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="C:\Users\Administrator\AppData\Roaming\ATAS\Indicators\" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
