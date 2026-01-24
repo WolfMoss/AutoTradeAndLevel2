@@ -365,17 +365,6 @@ def webhook_listener():
         logger.error(f"❌ 处理信号时发生错误: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 400
 
-def get_local_ip():
-    """获取本机IP地址"""
-    try:
-        # 连接到一个远程地址来获取本机IP（不会实际发送数据）
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return 'localhost'
 
 if __name__ == '__main__':
     # 加载品种映射配置
@@ -389,27 +378,21 @@ if __name__ == '__main__':
     
     # 获取服务器配置
     http_port = 80
-    local_ip = get_local_ip()
     
     # 显示webhook接口地址
     print("\n" + "=" * 60)
     print("🚀 信号转发服务已启动")
     print("=" * 60)
     print(f"📡 Webhook接口地址:")
-    print(f"   http://{local_ip}:{http_port}/webhook")
-    print(f"   http://localhost:{http_port}/webhook")
-    print(f"   http://127.0.0.1:{http_port}/webhook")
+    print(f"   http://0.0.0.0:{http_port}/webhook")
     print(f"\n🔌 WebSocket服务器:")
-    print(f"   ws://{local_ip}:{WS_PORT}")
-    print(f"   ws://localhost:{WS_PORT}")
+    print(f"   ws://0.0.0.0:{WS_PORT}")
     print(f"\n📁 配置文件路径: {_config_file_path}")
     print(f"📝 日志文件路径: {log_dir}")
     print("=" * 60 + "\n")
     
     logger.info("=" * 60)
     logger.info("信号转发服务已启动")
-    logger.info(f"Webhook接口: http://{local_ip}:{http_port}/webhook")
-    logger.info(f"WebSocket服务器: ws://{local_ip}:{WS_PORT}")
     logger.info(f"配置文件路径: {_config_file_path}")
     logger.info("=" * 60)
     
