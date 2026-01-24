@@ -364,5 +364,5 @@ if __name__ == '__main__':
     # 启动Flask HTTP服务器，默认端口 5000
     # debug=True 允许你修改代码后自动重启，方便调试
     # use_reloader=False 防止重载器导致WebSocket服务器重复启动（重载器会启动子进程导致端口冲突）
-    logger.info("Flask HTTP服务器启动在端口 5000")
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    logger.info("Flask HTTP服务器启动在端口 80")
+    app.run(host='0.0.0.0', port=80, debug=True, use_reloader=False)
