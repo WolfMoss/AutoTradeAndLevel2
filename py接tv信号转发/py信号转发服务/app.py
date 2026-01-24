@@ -1,11 +1,13 @@
 from flask import Flask, request, jsonify
 import logging
 import os
+import sys
 from datetime import datetime
 import asyncio
 import websockets
 import json
 import threading
+import socket
 
 # 初始化 Flask 应用
 app = Flask(__name__)
@@ -28,10 +30,22 @@ _default_ticker_mapping = {
 }
 
 _ticker_mapping = _default_ticker_mapping.copy()
-_config_file_path = os.path.join(os.path.dirname(__file__), 'ticker_mapping.txt')
+
+# 获取应用根目录（支持PyInstaller打包后的EXE）
+def get_app_dir():
+    """获取应用程序所在目录（支持打包后的EXE）"""
+    if getattr(sys, 'frozen', False):
+        # 打包成EXE后，使用EXE所在目录
+        return os.path.dirname(sys.executable)
+    else:
+        # 开发环境，使用脚本所在目录
+        return os.path.dirname(os.path.abspath(__file__))
+
+_app_dir = get_app_dir()
+_config_file_path = os.path.join(_app_dir, 'ticker_mapping.txt')
 
 # 配置日志记录到文件
-log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+log_dir = os.path.join(_app_dir, 'logs')
 os.makedirs(log_dir, exist_ok=True)
 
 # 日志文件名包含日期
@@ -351,6 +365,18 @@ def webhook_listener():
         logger.error(f"❌ 处理信号时发生错误: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 400
 
+def get_local_ip():
+    """获取本机IP地址"""
+    try:
+        # 连接到一个远程地址来获取本机IP（不会实际发送数据）
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return 'localhost'
+
 if __name__ == '__main__':
     # 加载品种映射配置
     load_ticker_mapping()
@@ -361,8 +387,34 @@ if __name__ == '__main__':
     # 启动WebSocket服务器
     start_websocket_server()
     
-    # 启动Flask HTTP服务器，默认端口 5000
+    # 获取服务器配置
+    http_port = 80
+    local_ip = get_local_ip()
+    
+    # 显示webhook接口地址
+    print("\n" + "=" * 60)
+    print("🚀 信号转发服务已启动")
+    print("=" * 60)
+    print(f"📡 Webhook接口地址:")
+    print(f"   http://{local_ip}:{http_port}/webhook")
+    print(f"   http://localhost:{http_port}/webhook")
+    print(f"   http://127.0.0.1:{http_port}/webhook")
+    print(f"\n🔌 WebSocket服务器:")
+    print(f"   ws://{local_ip}:{WS_PORT}")
+    print(f"   ws://localhost:{WS_PORT}")
+    print(f"\n📁 配置文件路径: {_config_file_path}")
+    print(f"📝 日志文件路径: {log_dir}")
+    print("=" * 60 + "\n")
+    
+    logger.info("=" * 60)
+    logger.info("信号转发服务已启动")
+    logger.info(f"Webhook接口: http://{local_ip}:{http_port}/webhook")
+    logger.info(f"WebSocket服务器: ws://{local_ip}:{WS_PORT}")
+    logger.info(f"配置文件路径: {_config_file_path}")
+    logger.info("=" * 60)
+    
+    # 启动Flask HTTP服务器
     # debug=True 允许你修改代码后自动重启，方便调试
     # use_reloader=False 防止重载器导致WebSocket服务器重复启动（重载器会启动子进程导致端口冲突）
-    logger.info("Flask HTTP服务器启动在端口 80")
-    app.run(host='0.0.0.0', port=80, debug=True, use_reloader=False)
+    logger.info(f"Flask HTTP服务器启动在端口 {http_port}")
+    app.run(host='0.0.0.0', port=http_port, debug=True, use_reloader=False)
