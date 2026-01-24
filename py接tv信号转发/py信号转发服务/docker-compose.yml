@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  webhook-server:
+    build: .
+    container_name: tv-signal-forwarder
+    ports:
+      - "8500:5000"
+    volumes:
+      # 挂载代码目录，方便开发时实时更新
+      - ./app.py:/app/app.py
+      # 挂载日志目录，方便查看日志文件
+      - ./logs:/app/logs
+    restart: unless-stopped
+    environment:
+      - FLASK_ENV=production
+    networks:
+      - webhook-network
+
+networks:
+  webhook-network:
+    driver: bridge
+

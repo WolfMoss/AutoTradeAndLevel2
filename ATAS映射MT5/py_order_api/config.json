@@ -1,0 +1,17 @@
+{
+    "mt5_path": "",
+    "server": "",
+    "login": "",
+    "password": "",
+    "log_level": "INFO",
+    "symbol_mapping": {
+        "BTCUSDT": {
+            "symbol": "BTCUSDm",
+            "volume_ratio": 1
+        },
+        "Gold": {
+            "symbol": "XAUUSD",
+            "volume_ratio": 0.01
+        }
+    }
+}
