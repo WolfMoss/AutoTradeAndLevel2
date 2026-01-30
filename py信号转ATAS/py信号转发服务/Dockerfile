@@ -13,8 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制应用代码
 COPY app.py .
 
-# 暴露端口 5000
-EXPOSE 5000
+# 暴露端口 80
+EXPOSE 80
 
 # 设置环境变量
 ENV FLASK_APP=app.py

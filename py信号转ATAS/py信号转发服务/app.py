@@ -377,7 +377,7 @@ if __name__ == '__main__':
     start_websocket_server()
     
     # 获取服务器配置
-    http_port = 80
+    http_port = 8500
     
     # 显示webhook接口地址
     print("\n" + "=" * 60)

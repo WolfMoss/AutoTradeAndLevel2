@@ -5,7 +5,8 @@ services:
     build: .
     container_name: tv-signal-forwarder
     ports:
-      - "8500:5000"
+      - "8500:80"
+      - "9528:9528"
     volumes:
       # 挂载代码目录，方便开发时实时更新
       - ./app.py:/app/app.py

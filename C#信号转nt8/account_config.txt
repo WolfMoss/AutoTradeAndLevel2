@@ -1,0 +1,10 @@
+# 账号配置
+# 格式：账号=手数,订单类型,是否启用
+# 订单类型：Market（市价）或 Limit（限价）
+# 是否启用：true 或 false
+# 支持注释（以#开头的行为注释）
+
+# 示例配置
+Sim101=2,Market,true
+# Account2=2,Limit,true
+
