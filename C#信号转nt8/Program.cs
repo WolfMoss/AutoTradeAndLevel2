@@ -13,12 +13,12 @@ namespace SignalForwarder;
 
 public class Program
 {
-    private static readonly Dictionary<string, string> DefaultTickerMapping = new()
+    private static readonly Dictionary<string, TickerMappingInfo> DefaultTickerMapping = new()
     {
-        { "GC", "MGC" } // 黄金：GC -> MGC
+        { "GC", new TickerMappingInfo { TargetTicker = "MGC", Quantity = 1 } } // 黄金：GC -> MGC，默认1手
     };
 
-    private static Dictionary<string, string> _tickerMapping = new(DefaultTickerMapping);
+    private static Dictionary<string, TickerMappingInfo> _tickerMapping = new(DefaultTickerMapping);
     private static string _appDir = string.Empty;
     private static string _configFilePath = string.Empty;
     private static string _accountConfigFilePath = string.Empty;
@@ -33,6 +33,18 @@ public class Program
 
     public static void Main(string[] args)
     {
+        // 设置控制台编码为 UTF-8，解决 Windows Server 上中文显示为问号的问题
+        try
+        {
+            // 设置控制台输出和输入编码为 UTF-8
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.InputEncoding = Encoding.UTF8;
+        }
+        catch
+        {
+            // 如果设置失败（某些环境不支持），忽略错误
+        }
+
         // 获取应用目录
         _appDir = AppContext.BaseDirectory;
         _configFilePath = Path.Combine(_appDir, "ticker_mapping.txt");
@@ -73,8 +85,8 @@ public class Program
         app.MapPost("/webhook", WebhookListener); // TradingView 信号接收
         app.MapPost("/tick", TickWebhookListener); // NT8 Tick 数据接收
 
-        // 配置 Kestrel 端点
-        var httpPort = 8500;
+        // 配置 Kestrel 端点（从配置文件或环境变量读取端口号）
+        var httpPort = GetHttpPort(app.Logger);
         app.Urls.Clear();
         app.Urls.Add($"http://0.0.0.0:{httpPort}");
 
@@ -100,10 +112,10 @@ public class Program
     private static void LoadTickerMapping(ILogger logger)
     {
         // 先使用默认配置
-        _tickerMapping = new Dictionary<string, string>(DefaultTickerMapping);
+        _tickerMapping = new Dictionary<string, TickerMappingInfo>(DefaultTickerMapping);
 
         // 尝试从配置文件加载
-        var fileMapping = new Dictionary<string, string>();
+        var fileMapping = new Dictionary<string, TickerMappingInfo>();
         if (File.Exists(_configFilePath))
         {
             try
@@ -116,15 +128,42 @@ public class Program
                     if (string.IsNullOrEmpty(line) || line.StartsWith('#'))
                         continue;
 
-                    // 解析 "源品种=目标品种" 格式
+                    // 解析 "源品种=目标品种,手数" 或 "源品种=目标品种" 格式
                     var parts = line.Split('=', 2);
                     if (parts.Length == 2)
                     {
                         var source = parts[0].Trim().ToUpperInvariant();
-                        var target = parts[1].Trim();
-                        if (!string.IsNullOrEmpty(source) && !string.IsNullOrEmpty(target))
+                        var targetPart = parts[1].Trim();
+                        
+                        if (!string.IsNullOrEmpty(source) && !string.IsNullOrEmpty(targetPart))
                         {
-                            fileMapping[source] = target;
+                            // 解析目标品种和手数
+                            var targetParts = targetPart.Split(',');
+                            var targetTicker = targetParts[0].Trim();
+                            var quantity = 1; // 默认手数为1
+                            
+                            // 如果提供了手数，解析手数
+                            if (targetParts.Length >= 2)
+                            {
+                                if (!int.TryParse(targetParts[1].Trim(), out quantity) || quantity <= 0)
+                                {
+                                    logger.LogWarning("配置文件第{LineNum}行手数格式错误，使用默认手数1: {Line}", i + 1, line);
+                                    quantity = 1;
+                                }
+                            }
+                            
+                            if (!string.IsNullOrEmpty(targetTicker))
+                            {
+                                fileMapping[source] = new TickerMappingInfo
+                                {
+                                    TargetTicker = targetTicker,
+                                    Quantity = quantity
+                                };
+                            }
+                            else
+                            {
+                                logger.LogWarning("配置文件第{LineNum}行目标品种为空，已跳过: {Line}", i + 1, line);
+                            }
                         }
                         else
                         {
@@ -144,7 +183,7 @@ public class Program
                         _tickerMapping[kvp.Key] = kvp.Value;
                     }
                     logger.LogInformation("已从配置文件加载品种映射: {Mapping}", 
-                        string.Join(", ", fileMapping.Select(kvp => $"{kvp.Key}={kvp.Value}")));
+                        string.Join(", ", fileMapping.Select(kvp => $"{kvp.Key}={kvp.Value.TargetTicker},{kvp.Value.Quantity}手")));
                 }
                 else
                 {
@@ -161,7 +200,7 @@ public class Program
             logger.LogInformation("配置文件 {ConfigPath} 不存在，使用默认配置", _configFilePath);
         }
 
-        // 环境变量作为备用
+        // 环境变量作为备用（保持向后兼容，只支持品种映射，不支持手数）
         var envMappingStr = Environment.GetEnvironmentVariable("TICKER_MAPPING");
         if (!string.IsNullOrEmpty(envMappingStr))
         {
@@ -172,7 +211,15 @@ public class Program
                 {
                     foreach (var kvp in envMapping)
                     {
-                        _tickerMapping[kvp.Key.ToUpperInvariant()] = kvp.Value;
+                        var source = kvp.Key.ToUpperInvariant();
+                        if (!_tickerMapping.ContainsKey(source))
+                        {
+                            _tickerMapping[source] = new TickerMappingInfo
+                            {
+                                TargetTicker = kvp.Value,
+                                Quantity = 1 // 环境变量不支持手数配置，默认1手
+                            };
+                        }
                     }
                     logger.LogInformation("已从环境变量加载品种映射: {Mapping}",
                         string.Join(", ", envMapping.Select(kvp => $"{kvp.Key}={kvp.Value}")));
@@ -185,25 +232,27 @@ public class Program
         }
 
         logger.LogInformation("最终品种映射配置: {Mapping}",
-            string.Join(", ", _tickerMapping.Select(kvp => $"{kvp.Key}={kvp.Value}")));
+            string.Join(", ", _tickerMapping.Select(kvp => $"{kvp.Key}={kvp.Value.TargetTicker},{kvp.Value.Quantity}手")));
     }
 
-    private static string MapTicker(string? ticker, ILogger logger)
+    private static TickerMappingInfo? MapTicker(string? ticker, ILogger logger)
     {
         if (string.IsNullOrEmpty(ticker) || ticker == "未知品种")
-            return ticker ?? string.Empty;
+            return new TickerMappingInfo { TargetTicker = ticker ?? string.Empty, Quantity = 1 };
 
         var tickerUpper = ticker.ToUpperInvariant();
-        if (_tickerMapping.TryGetValue(tickerUpper, out var mappedTicker))
+        if (_tickerMapping.TryGetValue(tickerUpper, out var mappingInfo))
         {
-            if (mappedTicker != ticker)
+            if (mappingInfo.TargetTicker != ticker)
             {
-                logger.LogInformation("品种映射: {Ticker} -> {MappedTicker}", ticker, mappedTicker);
+                logger.LogInformation("品种映射: {Ticker} -> {MappedTicker} (手数: {Quantity})", 
+                    ticker, mappingInfo.TargetTicker, mappingInfo.Quantity);
             }
-            return mappedTicker;
+            return mappingInfo;
         }
 
-        return ticker;
+        // 如果没有映射，返回原品种，默认1手
+        return new TickerMappingInfo { TargetTicker = ticker, Quantity = 1 };
     }
 
     private static void LoadAccountConfig(ILogger logger)
@@ -226,33 +275,33 @@ public class Program
                 if (string.IsNullOrEmpty(line) || line.StartsWith('#'))
                     continue;
 
-                // 解析 "账号=手数,订单类型,是否启用" 格式
+                // 解析 "账号=订单类型,是否启用" 格式（手数已移至 ticker_mapping.txt）
                 var parts = line.Split('=', 2);
                 if (parts.Length == 2)
                 {
                     var account = parts[0].Trim();
                     var configParts = parts[1].Split(',');
                     
-                    if (configParts.Length >= 2)
+                    if (configParts.Length >= 1)
                     {
                         var config = new AccountConfig
                         {
                             Account = account,
-                            Quantity = int.TryParse(configParts[0].Trim(), out var qty) ? qty : 1,
-                            OrderType = configParts[1].Trim()
+                            Quantity = 1, // 手数不再从账号配置读取，由品种映射配置提供
+                            OrderType = configParts[0].Trim()
                         };
 
                         // 可选的启用/禁用标志
-                        if (configParts.Length >= 3)
+                        if (configParts.Length >= 2)
                         {
-                            config.Enabled = bool.TryParse(configParts[2].Trim(), out var enabled) ? enabled : true;
+                            config.Enabled = bool.TryParse(configParts[1].Trim(), out var enabled) ? enabled : true;
                         }
 
                         if (!string.IsNullOrEmpty(config.Account))
                         {
                             _accountConfigs.Add(config);
-                            logger.LogInformation("已加载账号配置: {Account}, 手数={Quantity}, 类型={OrderType}, 启用={Enabled}",
-                                config.Account, config.Quantity, config.OrderType, config.Enabled);
+                            logger.LogInformation("已加载账号配置: {Account}, 类型={OrderType}, 启用={Enabled} (手数由品种映射配置)",
+                                config.Account, config.OrderType, config.Enabled);
                         }
                         else
                         {
@@ -278,101 +327,182 @@ public class Program
         }
     }
 
-    private static async Task WebhookListener(HttpContext context, ILogger<Program> logger)
+    /// <summary>
+    /// 从配置文件或环境变量读取 HTTP 端口号
+    /// </summary>
+    private static int GetHttpPort(ILogger logger)
     {
-        try
+        const int defaultPort = 8500;
+        var configFilePath = Path.Combine(_appDir, "app_config.txt");
+
+        // 1. 优先从配置文件读取
+        if (File.Exists(configFilePath))
         {
-            // 读取 JSON 数据
-            using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
-            var jsonText = await reader.ReadToEndAsync();
-            var data = JObject.Parse(jsonText);
-
-            // 记录原始数据
-            logger.LogInformation(new string('=', 50));
-            logger.LogInformation("【收到新信号】: {Data}", jsonText);
-
-            // 解析字段
-            var ticker = data["ticker"]?.ToString() ?? "未知品种";
-            var action = data["action"]?.ToString() ?? "无动作";
-            var priceToken = data["price"];
-            var intervalToken = data["interval"];
-
-            // 处理价格
-            double? priceValue = null;
-            if (priceToken != null && priceToken.Type != JTokenType.Null)
+            try
             {
-                var priceStr = priceToken.ToString();
-                if (priceStr != "未知价格" && double.TryParse(priceStr, out var price))
+                var lines = File.ReadAllLines(configFilePath);
+                foreach (var line in lines)
                 {
-                    priceValue = price;
+                    var trimmedLine = line.Trim();
+                    // 跳过空行和注释行
+                    if (string.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith('#'))
+                        continue;
+
+                    // 解析 "port=端口号" 格式
+                    if (trimmedLine.StartsWith("port=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var portStr = trimmedLine.Substring(5).Trim();
+                        if (int.TryParse(portStr, out var port) && port > 0 && port <= 65535)
+                        {
+                            logger.LogInformation("从配置文件读取端口号: {Port}", port);
+                            return port;
+                        }
+                        else
+                        {
+                            logger.LogWarning("配置文件中的端口号格式错误: {PortStr}，使用默认端口 {DefaultPort}", portStr, defaultPort);
+                        }
+                    }
                 }
             }
-
-            // 处理周期
-            int? intervalValue = null;
-            if (intervalToken != null && intervalToken.Type != JTokenType.Null)
+            catch (Exception e)
             {
-                var intervalStr = intervalToken.ToString();
-                if (int.TryParse(intervalStr, out var interval))
-                {
-                    intervalValue = interval;
-                }
+                logger.LogError(e, "读取配置文件失败，使用默认端口 {DefaultPort}", defaultPort);
             }
+        }
 
-            // 应用品种映射
-            var mappedTicker = MapTicker(ticker, logger);
-
-            var signalData = new
+        // 2. 从环境变量读取
+        var envPort = Environment.GetEnvironmentVariable("HTTP_PORT");
+        if (!string.IsNullOrEmpty(envPort))
+        {
+            if (int.TryParse(envPort, out var port) && port > 0 && port <= 65535)
             {
-                Ticker = mappedTicker,
-                Action = action,
-                Price = priceValue,
-                Interval = intervalValue
-            };
-
-            // 记录原始逻辑
-            if (action == "buy" || action == "sell")
-            {
-                logger.LogInformation("{Emoji} 触发{ActionName}逻辑 -> 品种={Ticker}, 周期={Interval}分钟, 动作={Action}, 价格: {Price}",
-                    action == "buy" ? "🚀" : "🔻",
-                    action == "buy" ? "买入" : "卖出",
-                    ticker, intervalValue?.ToString() ?? "未知", action, priceValue?.ToString() ?? "未知");
+                logger.LogInformation("从环境变量读取端口号: {Port}", port);
+                return port;
             }
             else
             {
-                logger.LogWarning("⚠️ 收到未知动作: {Action}", action);
+                logger.LogWarning("环境变量中的端口号格式错误: {EnvPort}，使用默认端口 {DefaultPort}", envPort, defaultPort);
             }
+        }
 
-            // NinjaTrader 下单任务（不等待完成）
-            if (_orderService != null && (action == "buy" || action == "sell"))
+        // 3. 使用默认端口
+        logger.LogInformation("使用默认端口号: {Port}", defaultPort);
+        return defaultPort;
+    }
+
+    private static async Task WebhookListener(HttpContext context, ILogger<Program> logger)
+    {
+        // 启用请求体缓冲，允许在返回响应后继续读取
+        context.Request.EnableBuffering();
+        
+        // 先读取请求体（请求体只能读取一次）
+        string jsonText;
+        try
+        {
+            // 重置流位置，确保从头读取
+            context.Request.Body.Position = 0;
+            using var reader = new StreamReader(context.Request.Body, Encoding.UTF8, leaveOpen: true);
+            jsonText = await reader.ReadToEndAsync();
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "❌ 读取请求体失败");
+            context.Response.StatusCode = 400;
+            context.Response.ContentType = "application/json";
+            var errorResponse = JsonConvert.SerializeObject(new { status = "error", message = "Failed to read request body" });
+            await context.Response.WriteAsync(errorResponse);
+            return;
+        }
+
+        // 立即返回成功响应，不等待处理完成
+        context.Response.StatusCode = 200;
+        context.Response.ContentType = "application/json";
+        var successResponse = JsonConvert.SerializeObject(new { status = "success", message = "Signal received" });
+        await context.Response.WriteAsync(successResponse);
+
+        // 在后台异步处理信号逻辑（不阻塞响应）
+        _ = Task.Run(async () =>
+        {
+            try
             {
-                Task.Run(() =>
+                // 记录原始数据
+                logger.LogInformation(new string('=', 50));
+                logger.LogInformation("【收到新信号】: {Data}", jsonText);
+
+                var data = JObject.Parse(jsonText);
+
+                // 解析字段
+                var ticker = data["ticker"]?.ToString() ?? "未知品种";
+                var action = data["action"]?.ToString() ?? "无动作";
+                var priceToken = data["price"];
+                var intervalToken = data["interval"];
+
+                // 处理价格
+                double? priceValue = null;
+                if (priceToken != null && priceToken.Type != JTokenType.Null)
+                {
+                    var priceStr = priceToken.ToString();
+                    if (priceStr != "未知价格" && double.TryParse(priceStr, out var price))
+                    {
+                        priceValue = price;
+                    }
+                }
+
+                // 处理周期
+                int? intervalValue = null;
+                if (intervalToken != null && intervalToken.Type != JTokenType.Null)
+                {
+                    var intervalStr = intervalToken.ToString();
+                    if (int.TryParse(intervalStr, out var interval))
+                    {
+                        intervalValue = interval;
+                    }
+                }
+
+                // 应用品种映射
+                var mappingInfo = MapTicker(ticker, logger);
+                var mappedTicker = mappingInfo?.TargetTicker ?? ticker;
+                var quantity = mappingInfo?.Quantity ?? 1;
+
+                var signalData = new
+                {
+                    Ticker = mappedTicker,
+                    Action = action,
+                    Price = priceValue,
+                    Interval = intervalValue
+                };
+
+                // 记录原始逻辑
+                if (action == "buy" || action == "sell")
+                {
+                    logger.LogInformation("{Emoji} 触发{ActionName}逻辑 -> 品种={Ticker} -> {MappedTicker}, 手数={Quantity}, 周期={Interval}分钟, 动作={Action}, 价格: {Price}",
+                        action == "buy" ? "🚀" : "🔻",
+                        action == "buy" ? "买入" : "卖出",
+                        ticker, mappedTicker, quantity, intervalValue?.ToString() ?? "未知", action, priceValue?.ToString() ?? "未知");
+                }
+                else
+                {
+                    logger.LogWarning("⚠️ 收到未知动作: {Action}", action);
+                }
+
+                // NinjaTrader 下单任务
+                if (_orderService != null && (action == "buy" || action == "sell"))
                 {
                     try
                     {
-                        _orderService.ProcessSignal(mappedTicker, action, priceValue);
+                        _orderService.ProcessSignal(mappedTicker, action, priceValue, quantity);
                     }
                     catch (Exception ex)
                     {
                         logger.LogError(ex, "发送订单失败");
                     }
-                });
+                }
             }
-
-            // 返回成功响应
-            context.Response.StatusCode = 200;
-            context.Response.ContentType = "application/json";
-            var successResponse = JsonConvert.SerializeObject(new { status = "success", message = "Signal received" });
-            await context.Response.WriteAsync(successResponse);
-        }
-        catch (Exception e)
-        {
-            logger.LogError(e, "❌ 处理信号时发生错误");
-            context.Response.StatusCode = 400;
-            context.Response.ContentType = "application/json";
-            var errorResponse = JsonConvert.SerializeObject(new { status = "error", message = e.Message });
-            await context.Response.WriteAsync(errorResponse);
-        }
+            catch (Exception e)
+            {
+                logger.LogError(e, "❌ 异步处理信号时发生错误");
+            }
+        });
     }
 
     /// <summary>
@@ -380,41 +510,60 @@ public class Program
     /// </summary>
     private static async Task TickWebhookListener(HttpContext context, ILogger<Program> logger)
     {
+        // 启用请求体缓冲，允许在返回响应后继续读取
+        context.Request.EnableBuffering();
+        
+        // 先读取请求体（请求体只能读取一次）
+        string jsonText;
         try
         {
-            // 读取 JSON 数据
-            using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
-            var jsonText = await reader.ReadToEndAsync();
-            var data = JObject.Parse(jsonText);
-
-            // 解析 tick 数据
-            var instrument = data["Instrument"]?.ToString() ?? "未知";
-            var price = data["Price"]?.ToObject<double?>();
-            var volume = data["Volume"]?.ToObject<int?>();
-            var time = data["Time"]?.ToString() ?? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            var marketDataType = data["MarketDataType"]?.ToString() ?? "未知";
-            var direction = data["Direction"]?.ToString() ?? "未知";
-
-            logger.LogInformation("收到 Tick 数据: 品种={Instrument}, 价格={Price}, 成交量={Volume}, 时间={Time}, 类型={MarketDataType}, 方向={Direction}",
-                instrument, price, volume, time, marketDataType, direction);
-
-            // 可以在这里添加 tick 数据的处理逻辑
-            // 例如：存储到数据库、触发其他逻辑等
-
-            // 返回成功响应
-            context.Response.StatusCode = 200;
-            context.Response.ContentType = "application/json";
-            var successResponse = JsonConvert.SerializeObject(new { status = "success", message = "Tick received" });
-            await context.Response.WriteAsync(successResponse);
+            // 重置流位置，确保从头读取
+            context.Request.Body.Position = 0;
+            using var reader = new StreamReader(context.Request.Body, Encoding.UTF8, leaveOpen: true);
+            jsonText = await reader.ReadToEndAsync();
         }
         catch (Exception e)
         {
-            logger.LogError(e, "处理 Tick 数据时发生错误");
+            logger.LogError(e, "❌ 读取 Tick 请求体失败");
             context.Response.StatusCode = 400;
             context.Response.ContentType = "application/json";
-            var errorResponse = JsonConvert.SerializeObject(new { status = "error", message = e.Message });
+            var errorResponse = JsonConvert.SerializeObject(new { status = "error", message = "Failed to read request body" });
             await context.Response.WriteAsync(errorResponse);
+            return;
         }
+
+        // 立即返回成功响应，不等待处理完成
+        context.Response.StatusCode = 200;
+        context.Response.ContentType = "application/json";
+        var successResponse = JsonConvert.SerializeObject(new { status = "success", message = "Tick received" });
+        await context.Response.WriteAsync(successResponse);
+
+        // 在后台异步处理 Tick 数据逻辑（不阻塞响应）
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var data = JObject.Parse(jsonText);
+
+                // 解析 tick 数据
+                var instrument = data["Instrument"]?.ToString() ?? "未知";
+                var price = data["Price"]?.ToObject<double?>();
+                var volume = data["Volume"]?.ToObject<int?>();
+                var time = data["Time"]?.ToString() ?? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                var marketDataType = data["MarketDataType"]?.ToString() ?? "未知";
+                var direction = data["Direction"]?.ToString() ?? "未知";
+
+                logger.LogInformation("收到 Tick 数据: 品种={Instrument}, 价格={Price}, 成交量={Volume}, 时间={Time}, 类型={MarketDataType}, 方向={Direction}",
+                    instrument, price, volume, time, marketDataType, direction);
+
+                // 可以在这里添加 tick 数据的处理逻辑
+                // 例如：存储到数据库、触发其他逻辑等
+            }
+            catch (Exception e)
+            {
+                logger.LogError(e, "❌ 异步处理 Tick 数据时发生错误");
+            }
+        });
     }
 
     private static void InitializeOrderService(ILogger logger)

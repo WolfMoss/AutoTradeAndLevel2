@@ -59,9 +59,10 @@
 ├── TickWebSocketSender.cs       # NT8 指标（需复制到 NT8 目录）
 ├── NinjaTraderOrderService.cs    # NT8 订单服务
 ├── AccountConfig.cs              # 账号配置类
+├── TickerMappingInfo.cs          # 品种映射信息类
 ├── FileLoggerProvider.cs         # 文件日志提供者
 ├── SignalForwarder.csproj       # 项目文件
-├── ticker_mapping.txt           # 品种映射配置
+├── ticker_mapping.txt           # 品种映射配置（含手数）
 ├── account_config.txt            # 账号配置
 └── README.md                     # 本文档
 ```
@@ -136,54 +137,61 @@ dotnet publish -c Release -r win-x64
 
 ### 品种映射配置 (`ticker_mapping.txt`)
 
-用于将 TradingView 的品种名称映射到 NinjaTrader 8 的品种名称。
+用于将 TradingView 的品种名称映射到 NinjaTrader 8 的品种名称，并配置每个品种的交易手数。
 
 **格式：**
 ```
 # 品种映射配置
-# 格式：源品种=目标品种
+# 格式：源品种=目标品种,手数
+# 手数可选，如果不指定则默认为1手
 # 支持注释行（以 # 开头）
 
-GC=MGC      # 黄金：GC -> MGC
-CL=MCL      # 原油：CL -> MCL
-ES=MES      # 标普500：ES -> MES
+GC1!=@MGC,2      # 黄金：GC1! -> @MGC，手数为2
+CL=MCL,1          # 原油：CL -> MCL，手数为1
+ES=MES            # 标普500：ES -> MES，手数默认为1
 ```
 
 **说明：**
 - 每行一个映射规则
-- 格式：`源品种=目标品种`
+- 格式：`源品种=目标品种,手数` 或 `源品种=目标品种`（手数默认为1）
+- 手数为整数，必须大于0
 - 支持注释（以 `#` 开头）
 - 空行会被忽略
 - 修改后自动重载（延迟约 2 秒）
+- **重要**：手数配置在品种映射文件中，每个品种可以配置不同的手数
 
 ### 账号配置 (`account_config.txt`)
 
-配置多个 NinjaTrader 8 账号，每个账号可以独立设置手数和订单类型。
+配置多个 NinjaTrader 8 账号，每个账号可以独立设置订单类型。
 
 **格式：**
 ```
 # 账号配置
-# 格式：账号=手数,订单类型,是否启用
+# 格式：账号=订单类型,是否启用
 # 订单类型：Market（市价）或 Limit（限价）
 # 是否启用：true 或 false（可选，默认为 true）
+# 注意：手数配置已移至 ticker_mapping.txt，每个品种可以配置不同的手数
 
-Account1=1,Market,true
-Account2=2,Limit,true
-Account3=1,Market,false
+Account1=Market,true
+Account2=Limit,true
+Account3=Market,false
 ```
 
 **配置项说明：**
 - **账号**：NinjaTrader 8 账号名称（必须与 NT8 中的账号名称完全一致）
-- **手数**：每次交易的手数（整数）
 - **订单类型**：`Market`（市价）或 `Limit`（限价）
 - **是否启用**：`true`（启用）或 `false`（禁用），可选，默认为 `true`
 
 **示例：**
-- `Account1=1,Market,true` - 账号 Account1，每次交易 1 手，使用市价单，已启用
-- `Account2=2,Limit,true` - 账号 Account2，每次交易 2 手，使用限价单，已启用
-- `Account3=1,Market,false` - 账号 Account3，已禁用，不会发送订单
+- `Account1=Market,true` - 账号 Account1，使用市价单，已启用
+- `Account2=Limit,true` - 账号 Account2，使用限价单，已启用
+- `Account3=Market,false` - 账号 Account3，已禁用，不会发送订单
 
-**注意：**
+**重要说明：**
+- **手数配置已移至 `ticker_mapping.txt`**，每个品种可以配置不同的手数
+- 当收到交易信号时，系统会：
+  1. 从 `ticker_mapping.txt` 获取该品种配置的手数
+  2. 为所有启用的账号使用该手数发送订单
 - 修改配置文件后会自动重载（延迟约 2 秒）
 - 如果账号配置发生变化，订单服务会自动更新
 - 如果之前没有配置账号，添加配置后会自动初始化订单服务

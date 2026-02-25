@@ -16,10 +16,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Remove="app_config.txt" />
     <None Remove="ticker_mapping.txt" />
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="app_config.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
     <Content Include="ticker_mapping.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>

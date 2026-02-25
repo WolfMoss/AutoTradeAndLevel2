@@ -91,48 +91,65 @@ public class NinjaTraderOrderService : IDisposable
     }
 
     /// <summary>
-    /// 发送订单
+    /// 发送订单（支持并发调用）
     /// </summary>
     public void SubmitOrder(string account, string instrument, string action, int quantity, string orderType, double? price = null)
     {
+        Client? client;
+        
+        // 快速获取客户端引用（加锁范围最小化）
+        lock (_clientLock)
+        {
+            if (_client == null)
+            {
+                _logger.LogWarning("NinjaTrader 客户端未初始化，无法发送订单");
+                return;
+            }
+            
+            // 检查连接状态
+            int connectionStatus = _client.Connected(0);
+            if (connectionStatus != 0)
+            {
+                _logger.LogWarning("NinjaTrader 客户端未连接，无法发送订单");
+                return;
+            }
+            
+            // 获取客户端引用（在锁内获取，确保引用有效）
+            client = _client;
+        }
+
+        // 在锁外准备订单参数（可以并发执行，很快）
         try
         {
+            // 确定订单方向：BUY 或 SELL
+            var orderAction = action.ToLowerInvariant() == "buy" ? "BUY" : "SELL";
+
+            // 确定订单类型：MARKET 或 LIMIT
+            var ntOrderType = orderType.ToUpperInvariant() == "LIMIT" ? "LIMIT" : "MARKET";
+
+            // 限价单价格，市价单填 0
+            double limitPrice = (ntOrderType == "LIMIT" && price.HasValue) ? price.Value : 0;
+
+            // 止损价（市价单填 0）
+            double stopPrice = 0;
+
+            // 有效期：DAY（日内有效）
+            string tif = "DAY";
+
+            // Command 调用必须加锁，因为 NinjaTrader.Client 不是线程安全的
+            // 虽然会串行执行 Command，但参数准备部分可以并发，仍然比完全串行快
+            int result;
             lock (_clientLock)
             {
-                if (_client == null)
-                {
-                    _logger.LogWarning("NinjaTrader 客户端未初始化，无法发送订单");
-                    return;
-                }
-
-                // 检查连接状态
-                int connectionStatus = _client.Connected(0);
-                if (connectionStatus != 0)
-                {
-                    _logger.LogWarning("NinjaTrader 客户端未连接，无法发送订单");
-                    return;
-                }
-
-                // 确定订单方向：BUY 或 SELL
-                var orderAction = action.ToLowerInvariant() == "buy" ? "BUY" : "SELL";
-
-                // 确定订单类型：MARKET 或 LIMIT
-                var ntOrderType = orderType.ToUpperInvariant() == "LIMIT" ? "LIMIT" : "MARKET";
-
-                // 限价单价格，市价单填 0
-                double limitPrice = (ntOrderType == "LIMIT" && price.HasValue) ? price.Value : 0;
-
-                // 止损价（市价单填 0）
-                double stopPrice = 0;
-
-                // 有效期：DAY（日内有效）
-                string tif = "DAY";
-
-                // Command 参数：Command, Account, Instrument, Action, Quantity, OrderType, LimitPrice, StopPrice, TIF, OcoId, OrderId, StrategyId, StrategyName
-                int result = _client.Command(
+                // 记录最终发送给 NT8 的品种名称
+                _logger.LogInformation("📤 发送订单到 NT8: 账号={Account}, 品种={Instrument}, 方向={Action}, 手数={Quantity}, 类型={OrderType}, 限价={LimitPrice}",
+                    account, instrument, orderAction, quantity, ntOrderType, 
+                    limitPrice > 0 ? limitPrice.ToString("F2") : "市价");
+                
+                result = client.Command(
                     "PLACE",           // 命令：PLACE（下单）
                     account,            // 账户名
-                    instrument,         // 合约名称
+                    instrument,         // 合约名称（最终发送给 NT8 的值）
                     orderAction,        // BUY 或 SELL
                     quantity,          // 数量
                     ntOrderType,       // MARKET 或 LIMIT
@@ -144,11 +161,11 @@ public class NinjaTraderOrderService : IDisposable
                     "",                 // StrategyId
                     ""                  // StrategyName
                 );
-
-                _logger.LogInformation("订单已提交: 账号={Account}, 品种={Instrument}, 方向={Action}, 手数={Quantity}, 类型={OrderType}, 价格={Price}, 结果={Result}",
-                    account, instrument, orderAction, quantity, ntOrderType, 
-                    limitPrice > 0 ? limitPrice.ToString("F2") : "市价", result);
             }
+
+            _logger.LogInformation("订单已提交: 账号={Account}, 品种={Instrument}, 方向={Action}, 手数={Quantity}, 类型={OrderType}, 价格={Price}, 结果={Result}",
+                account, instrument, orderAction, quantity, ntOrderType, 
+                limitPrice > 0 ? limitPrice.ToString("F2") : "市价", result);
         }
         catch (Exception ex)
         {
@@ -159,7 +176,7 @@ public class NinjaTraderOrderService : IDisposable
     /// <summary>
     /// 处理交易信号（并发发送多个账号的订单）
     /// </summary>
-    public void ProcessSignal(string ticker, string action, double? price)
+    public void ProcessSignal(string ticker, string action, double? price, int quantity)
     {
         List<AccountConfig> accountsCopy;
         lock (_accountsLock)
@@ -180,7 +197,7 @@ public class NinjaTraderOrderService : IDisposable
             return;
         }
 
-        // 并发发送订单到所有账号
+        // 并发发送订单到所有账号，使用品种配置的手数
         Parallel.ForEach(enabledAccounts, account =>
         {
             try
@@ -188,7 +205,7 @@ public class NinjaTraderOrderService : IDisposable
                 var orderType = account.OrderType;
                 var orderPrice = orderType == "Limit" && price.HasValue ? price : null;
 
-                SubmitOrder(account.Account, ticker, action, account.Quantity, orderType, orderPrice);
+                SubmitOrder(account.Account, ticker, action, quantity, orderType, orderPrice);
             }
             catch (Exception ex)
             {

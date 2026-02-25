@@ -409,7 +409,62 @@ namespace ATASOrderFlowExporter
                     headerWritten = true;
                     lastBarOffset = stream.Position;
                 }
+                else
+                {
+                    // 读取文件中的表头，比较是否与当前表头一致
+                    stream.Seek(0, SeekOrigin.Begin);
+                    string existingHeader = null;
+                    using (var reader = new StreamReader(stream, Encoding.UTF8, true, 1024, true))
+                    {
+                        existingHeader = reader.ReadLine();
+                    }
+                    
+                    // 如果表头不一致（配置改变了），需要重新写入整个文件
+                    if (existingHeader != header)
+                    {
+                        // 读取所有现有数据行（除了表头）
+                        stream.Seek(0, SeekOrigin.Begin);
+                        List<string> existingLines = new List<string>();
+                        using (var reader = new StreamReader(stream, Encoding.UTF8, true, 1024, true))
+                        {
+                            string firstLine = reader.ReadLine(); // 跳过旧表头
+                            string line;
+                            while ((line = reader.ReadLine()) != null)
+                            {
+                                existingLines.Add(line);
+                            }
+                        }
+                        
+                        // 如果是更新同一个Bar，移除最后一行（当前Bar的旧数据）
+                        if (barIndex == _lastExportedBar && existingLines.Count > 0)
+                        {
+                            existingLines.RemoveAt(existingLines.Count - 1);
+                        }
+                        
+                        // 重新写入表头、之前的数据行和新数据
+                        stream.SetLength(0);
+                        stream.Seek(0, SeekOrigin.Begin);
+                        using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true))
+                        {
+                            writer.WriteLine(header);
+                            foreach (var line in existingLines)
+                            {
+                                writer.WriteLine(line);
+                            }
+                            writer.WriteLine(content);
+                        }
+                        headerWritten = true;
+                        // 更新lastBarOffset为新数据行的位置
+                        lastBarOffset = Encoding.UTF8.GetByteCount(header + Environment.NewLine);
+                        foreach (var line in existingLines)
+                        {
+                            lastBarOffset += Encoding.UTF8.GetByteCount(line + Environment.NewLine);
+                        }
+                        return; // 已经处理完成，直接返回
+                    }
+                }
 
+                // 表头一致的情况：直接追加或覆盖
                 if (barIndex > _lastExportedBar)
                 {
                     // 这是一个新Bar：在文件末尾追加
@@ -433,6 +488,7 @@ namespace ATASOrderFlowExporter
                 // 如果 barIndex < _lastExportedBar，通常是历史数据重算，这里不做处理以保持文件顺序
             }
         }
+
 
         /// <summary>
         /// 获取主数据CSV表头

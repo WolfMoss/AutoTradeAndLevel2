@@ -1,10 +1,11 @@
 # 账号配置
-# 格式：账号=手数,订单类型,是否启用
+# 格式：账号=订单类型,是否启用
 # 订单类型：Market（市价）或 Limit（限价）
-# 是否启用：true 或 false
+# 是否启用：true 或 false（可选，默认为 true）
 # 支持注释（以#开头的行为注释）
+# 注意：手数配置已移至 ticker_mapping.txt，每个品种可以配置不同的手数
 
 # 示例配置
-Sim101=2,Market,true
-# Account2=2,Limit,true
+Sim101=Market,true
+# Account2=Limit,true
 
