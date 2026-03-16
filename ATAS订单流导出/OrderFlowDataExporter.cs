@@ -208,6 +208,11 @@ namespace ATASOrderFlowExporter
             {
                 var candle = GetCandle(bar);
                 var data = ExtractOrderFlowData(bar, candle);
+                if (bar > 0)
+                {
+                    var prevCandle = GetCandle(bar - 1);
+                    ComputeChangePercentages(data, candle, prevCandle);
+                }
                 ExportDataToCSV(data);
 
                 _lastExportedBar = bar;
@@ -235,6 +240,7 @@ namespace ATASOrderFlowExporter
                 BarIndex = bar,
                 Time = candle.Time,
                 LastTime = candle.LastTime,
+                Hour = candle.Time.Hour,
 
                 // OHLCV数据
                 Open = candle.Open,
@@ -246,12 +252,12 @@ namespace ATASOrderFlowExporter
                 // 订单流核心数据
                 Bid = candle.Bid,
                 Ask = candle.Ask,
-                Delta = candle.Delta,
+                Delta = candle.Delta == 0 ? 1 : candle.Delta,
                 Betweens = candle.Betweens,
 
                 // Delta极值
-                MaxDelta = candle.MaxDelta,
-                MinDelta = candle.MinDelta,
+                MaxDelta = candle.MaxDelta == 0 ? 1 : candle.MaxDelta,
+                MinDelta = candle.MinDelta == 0 ? 1 : candle.MinDelta,
 
                 // 持仓量数据
                 OI = candle.OI,
@@ -320,6 +326,63 @@ namespace ATASOrderFlowExporter
             }
 
             return data;
+        }
+
+        /// <summary>
+        /// 计算相对上一根K线的涨跌百分比并写入 data
+        /// </summary>
+        private void ComputeChangePercentages(OrderFlowData data, IndicatorCandle current, IndicatorCandle prev)
+        {
+            data.CloseChgPct = ChangePct(current.Close, prev.Close);
+            data.VolumeChgPct = ChangePct(current.Volume, prev.Volume);
+            // Delta/MaxDelta/MinDelta 可能为负，用“变化量/上期绝对值”计算百分比；与 ExtractOrderFlowData 一致，上期为0时按1算避免空值
+            decimal prevDelta = prev.Delta == 0 ? 1 : prev.Delta;
+            decimal prevMaxDelta = prev.MaxDelta == 0 ? 1 : prev.MaxDelta;
+            decimal prevMinDelta = prev.MinDelta == 0 ? 1 : prev.MinDelta;
+            data.DeltaChgPct = ChangePctSigned(current.Delta, prevDelta);
+            data.MaxDeltaChgPct = ChangePctSigned(current.MaxDelta, prevMaxDelta);
+            data.MinDeltaChgPct = ChangePctSigned(current.MinDelta, prevMinDelta);
+            data.TicksChgPct = ChangePct(current.Ticks, prev.Ticks);
+
+            if (ExportPOC && current.MaxVolumePriceInfo != null && prev.MaxVolumePriceInfo != null)
+            {
+                data.POCPriceChgPct = ChangePct(current.MaxVolumePriceInfo.Price, prev.MaxVolumePriceInfo.Price);
+                data.POCVolumeChgPct = ChangePct(current.MaxVolumePriceInfo.Volume, prev.MaxVolumePriceInfo.Volume);
+            }
+
+            if (ExportMaxDeltaInfo)
+            {
+                if (current.MaxPositiveDeltaPriceInfo != null && prev.MaxPositiveDeltaPriceInfo != null)
+                {
+                    data.MaxPosDeltaPriceChgPct = ChangePct(current.MaxPositiveDeltaPriceInfo.Price, prev.MaxPositiveDeltaPriceInfo.Price);
+                    data.MaxPosDeltaVolumeChgPct = ChangePct(current.MaxPositiveDeltaPriceInfo.Volume, prev.MaxPositiveDeltaPriceInfo.Volume);
+                }
+                if (current.MaxNegativeDeltaPriceInfo != null && prev.MaxNegativeDeltaPriceInfo != null)
+                {
+                    data.MaxNegDeltaPriceChgPct = ChangePct(current.MaxNegativeDeltaPriceInfo.Price, prev.MaxNegativeDeltaPriceInfo.Price);
+                    data.MaxNegDeltaVolumeChgPct = ChangePct(current.MaxNegativeDeltaPriceInfo.Volume, prev.MaxNegativeDeltaPriceInfo.Volume);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 计算涨跌百分比：(当前 - 上期) / 上期 * 100，上期为0时返回 null。适用于价格、成交量等非负值。
+        /// </summary>
+        private static decimal? ChangePct(decimal current, decimal prev)
+        {
+            if (prev == 0) return null;
+            return (current - prev) / prev * 100;
+        }
+
+        /// <summary>
+        /// 适用于可正可负的指标（如 Delta、MaxDelta、MinDelta）：(当前 - 上期) / |上期| * 100。
+        /// 上期为 0 时返回 null，避免除零；分母用绝对值，正负号表示增减方向。
+        /// </summary>
+        private static decimal? ChangePctSigned(decimal current, decimal prev)
+        {
+            if (prev == 0) return null;
+            decimal absPrev = Math.Abs(prev);
+            return (current - prev) / absPrev * 100;
         }
 
         #endregion
@@ -501,26 +564,27 @@ namespace ATASOrderFlowExporter
                 "BarIndex",
                 "Time",
                 "LastTime",
+                "Hour",
                 "Open",
                 "High",
                 "Low",
                 "Close",
+                "CloseChgPct",
                 "Volume",
-                "Bid",
-                "Ask",
+                "VolumeChgPct",
                 "Delta",
-                "Betweens",
+                "DeltaChgPct",
                 "MaxDelta",
+                "MaxDeltaChgPct",
                 "MinDelta",
-                "OI",
-                "MaxOI",
-                "MinOI",
-                "Ticks"
+                "MinDeltaChgPct",
+                "Ticks",
+                "TicksChgPct"
             };
 
             if (ExportPOC)
             {
-                headers.AddRange(new[] { "POCPrice", "POCVolume", "POCBid", "POCAsk" });
+                headers.AddRange(new[] { "POCPrice", "POCPriceChgPct", "POCVolume", "POCVolumeChgPct" });
             }
 
             if (ExportValueArea)
@@ -532,8 +596,10 @@ namespace ATASOrderFlowExporter
             {
                 headers.AddRange(new[] 
                 { 
-                    "MaxPosDeltaPrice", "MaxPosDeltaVolume",
-                    "MaxNegDeltaPrice", "MaxNegDeltaVolume"
+                    "MaxPosDeltaPrice", "MaxPosDeltaPriceChgPct",
+                    "MaxPosDeltaVolume", "MaxPosDeltaVolumeChgPct",
+                    "MaxNegDeltaPrice", "MaxNegDeltaPriceChgPct",
+                    "MaxNegDeltaVolume", "MaxNegDeltaVolumeChgPct"
                 });
             }
 
@@ -563,21 +629,22 @@ namespace ATASOrderFlowExporter
                 data.BarIndex.ToString(),
                 data.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                 data.LastTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                data.Hour.ToString(),
                 FormatDecimal(data.Open),
                 FormatDecimal(data.High),
                 FormatDecimal(data.Low),
                 FormatDecimal(data.Close),
+                FormatDecimalNullable(data.CloseChgPct),
                 FormatDecimal(data.Volume),
-                FormatDecimal(data.Bid),
-                FormatDecimal(data.Ask),
+                FormatDecimalNullable(data.VolumeChgPct),
                 FormatDecimal(data.Delta),
-                FormatDecimal(data.Betweens),
+                FormatDecimalNullable(data.DeltaChgPct),
                 FormatDecimal(data.MaxDelta),
+                FormatDecimalNullable(data.MaxDeltaChgPct),
                 FormatDecimal(data.MinDelta),
-                FormatDecimal(data.OI),
-                FormatDecimal(data.MaxOI),
-                FormatDecimal(data.MinOI),
-                FormatDecimal(data.Ticks)
+                FormatDecimalNullable(data.MinDeltaChgPct),
+                FormatDecimal(data.Ticks),
+                FormatDecimalNullable(data.TicksChgPct)
             };
 
             if (ExportPOC)
@@ -585,9 +652,9 @@ namespace ATASOrderFlowExporter
                 values.AddRange(new[] 
                 { 
                     FormatDecimal(data.POCPrice), 
+                    FormatDecimalNullable(data.POCPriceChgPct),
                     FormatDecimal(data.POCVolume),
-                    FormatDecimal(data.POCBid),
-                    FormatDecimal(data.POCAsk)
+                    FormatDecimalNullable(data.POCVolumeChgPct)
                 });
             }
 
@@ -596,7 +663,7 @@ namespace ATASOrderFlowExporter
                 values.AddRange(new[] 
                 { 
                     FormatDecimal(data.VAH), 
-                    FormatDecimal(data.VAL),
+                    FormatDecimal(data.VAL), 
                     FormatDecimal(data.VWAP)
                 });
             }
@@ -606,9 +673,13 @@ namespace ATASOrderFlowExporter
                 values.AddRange(new[] 
                 { 
                     FormatDecimal(data.MaxPosDeltaPrice),
+                    FormatDecimalNullable(data.MaxPosDeltaPriceChgPct),
                     FormatDecimal(data.MaxPosDeltaVolume),
+                    FormatDecimalNullable(data.MaxPosDeltaVolumeChgPct),
                     FormatDecimal(data.MaxNegDeltaPrice),
-                    FormatDecimal(data.MaxNegDeltaVolume)
+                    FormatDecimalNullable(data.MaxNegDeltaPriceChgPct),
+                    FormatDecimal(data.MaxNegDeltaVolume),
+                    FormatDecimalNullable(data.MaxNegDeltaVolumeChgPct)
                 });
             }
 
@@ -640,6 +711,14 @@ namespace ATASOrderFlowExporter
         private string FormatDecimal(decimal value)
         {
             return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// 格式化可空的decimal值（涨跌百分比等），null 输出空字符串
+        /// </summary>
+        private string FormatDecimalNullable(decimal? value)
+        {
+            return value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : "";
         }
 
         #endregion
@@ -1020,6 +1099,8 @@ namespace ATASOrderFlowExporter
         public int BarIndex { get; set; }
         public DateTime Time { get; set; }
         public DateTime LastTime { get; set; }
+        /// <summary>Time 的小时部分（0-23）</summary>
+        public int Hour { get; set; }
 
         // OHLCV
         public decimal Open { get; set; }
@@ -1060,6 +1141,20 @@ namespace ATASOrderFlowExporter
         public decimal MaxPosDeltaVolume { get; set; }
         public decimal MaxNegDeltaPrice { get; set; }
         public decimal MaxNegDeltaVolume { get; set; }
+
+        // 涨跌百分比（相对上一根K线）
+        public decimal? CloseChgPct { get; set; }
+        public decimal? VolumeChgPct { get; set; }
+        public decimal? DeltaChgPct { get; set; }
+        public decimal? MaxDeltaChgPct { get; set; }
+        public decimal? MinDeltaChgPct { get; set; }
+        public decimal? TicksChgPct { get; set; }
+        public decimal? POCPriceChgPct { get; set; }
+        public decimal? POCVolumeChgPct { get; set; }
+        public decimal? MaxPosDeltaPriceChgPct { get; set; }
+        public decimal? MaxPosDeltaVolumeChgPct { get; set; }
+        public decimal? MaxNegDeltaPriceChgPct { get; set; }
+        public decimal? MaxNegDeltaVolumeChgPct { get; set; }
 
         // Footprint详情
         public List<FootprintLevel> FootprintLevels { get; set; }
