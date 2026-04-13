@@ -99,6 +99,12 @@ namespace ATASOrderFlowExporter
         public bool ExportMaxDeltaInfo { get; set; } = true;
 
         /// <summary>
+        /// 是否计算并导出相对上一根K线的涨跌百分比列（CloseChgPct、VolumeChgPct、DeltaChgPct 等 *ChgPct 列）
+        /// </summary>
+        [Display(Name = "导出Pct变化列", GroupName = "数据选项", Order = 75)]
+        public bool ExportPctChangeColumns { get; set; } = false;
+
+        /// <summary>
         /// WebSocket服务端口
         /// </summary>
         [Display(Name = "WebSocket端口", GroupName = "WebSocket设置", Order = 80)]
@@ -208,7 +214,7 @@ namespace ATASOrderFlowExporter
             {
                 var candle = GetCandle(bar);
                 var data = ExtractOrderFlowData(bar, candle);
-                if (bar > 0)
+                if (bar > 0 && ExportPctChangeColumns)
                 {
                     var prevCandle = GetCandle(bar - 1);
                     ComputeChangePercentages(data, candle, prevCandle);
@@ -568,23 +574,32 @@ namespace ATASOrderFlowExporter
                 "Open",
                 "High",
                 "Low",
-                "Close",
-                "CloseChgPct",
-                "Volume",
-                "VolumeChgPct",
-                "Delta",
-                "DeltaChgPct",
-                "MaxDelta",
-                "MaxDeltaChgPct",
-                "MinDelta",
-                "MinDeltaChgPct",
-                "Ticks",
-                "TicksChgPct"
+                "Close"
             };
+            if (ExportPctChangeColumns)
+                headers.Add("CloseChgPct");
+            headers.Add("Volume");
+            if (ExportPctChangeColumns)
+                headers.Add("VolumeChgPct");
+            headers.Add("Delta");
+            if (ExportPctChangeColumns)
+                headers.Add("DeltaChgPct");
+            headers.Add("MaxDelta");
+            if (ExportPctChangeColumns)
+                headers.Add("MaxDeltaChgPct");
+            headers.Add("MinDelta");
+            if (ExportPctChangeColumns)
+                headers.Add("MinDeltaChgPct");
+            headers.Add("Ticks");
+            if (ExportPctChangeColumns)
+                headers.Add("TicksChgPct");
 
             if (ExportPOC)
             {
-                headers.AddRange(new[] { "POCPrice", "POCPriceChgPct", "POCVolume", "POCVolumeChgPct" });
+                if (ExportPctChangeColumns)
+                    headers.AddRange(new[] { "POCPrice", "POCPriceChgPct", "POCVolume", "POCVolumeChgPct" });
+                else
+                    headers.AddRange(new[] { "POCPrice", "POCVolume" });
             }
 
             if (ExportValueArea)
@@ -594,13 +609,24 @@ namespace ATASOrderFlowExporter
 
             if (ExportMaxDeltaInfo)
             {
-                headers.AddRange(new[] 
-                { 
-                    "MaxPosDeltaPrice", "MaxPosDeltaPriceChgPct",
-                    "MaxPosDeltaVolume", "MaxPosDeltaVolumeChgPct",
-                    "MaxNegDeltaPrice", "MaxNegDeltaPriceChgPct",
-                    "MaxNegDeltaVolume", "MaxNegDeltaVolumeChgPct"
-                });
+                if (ExportPctChangeColumns)
+                {
+                    headers.AddRange(new[]
+                    {
+                        "MaxPosDeltaPrice", "MaxPosDeltaPriceChgPct",
+                        "MaxPosDeltaVolume", "MaxPosDeltaVolumeChgPct",
+                        "MaxNegDeltaPrice", "MaxNegDeltaPriceChgPct",
+                        "MaxNegDeltaVolume", "MaxNegDeltaVolumeChgPct"
+                    });
+                }
+                else
+                {
+                    headers.AddRange(new[]
+                    {
+                        "MaxPosDeltaPrice", "MaxPosDeltaVolume",
+                        "MaxNegDeltaPrice", "MaxNegDeltaVolume"
+                    });
+                }
             }
 
             return string.Join(",", headers);
@@ -633,54 +659,84 @@ namespace ATASOrderFlowExporter
                 FormatDecimal(data.Open),
                 FormatDecimal(data.High),
                 FormatDecimal(data.Low),
-                FormatDecimal(data.Close),
-                FormatDecimalNullable(data.CloseChgPct),
-                FormatDecimal(data.Volume),
-                FormatDecimalNullable(data.VolumeChgPct),
-                FormatDecimal(data.Delta),
-                FormatDecimalNullable(data.DeltaChgPct),
-                FormatDecimal(data.MaxDelta),
-                FormatDecimalNullable(data.MaxDeltaChgPct),
-                FormatDecimal(data.MinDelta),
-                FormatDecimalNullable(data.MinDeltaChgPct),
-                FormatDecimal(data.Ticks),
-                FormatDecimalNullable(data.TicksChgPct)
+                FormatDecimal(data.Close)
             };
+            if (ExportPctChangeColumns)
+                values.Add(FormatDecimalNullable(data.CloseChgPct));
+            values.Add(FormatDecimal(data.Volume));
+            if (ExportPctChangeColumns)
+                values.Add(FormatDecimalNullable(data.VolumeChgPct));
+            values.Add(FormatDecimal(data.Delta));
+            if (ExportPctChangeColumns)
+                values.Add(FormatDecimalNullable(data.DeltaChgPct));
+            values.Add(FormatDecimal(data.MaxDelta));
+            if (ExportPctChangeColumns)
+                values.Add(FormatDecimalNullable(data.MaxDeltaChgPct));
+            values.Add(FormatDecimal(data.MinDelta));
+            if (ExportPctChangeColumns)
+                values.Add(FormatDecimalNullable(data.MinDeltaChgPct));
+            values.Add(FormatDecimal(data.Ticks));
+            if (ExportPctChangeColumns)
+                values.Add(FormatDecimalNullable(data.TicksChgPct));
 
             if (ExportPOC)
             {
-                values.AddRange(new[] 
-                { 
-                    FormatDecimal(data.POCPrice), 
-                    FormatDecimalNullable(data.POCPriceChgPct),
-                    FormatDecimal(data.POCVolume),
-                    FormatDecimalNullable(data.POCVolumeChgPct)
-                });
+                if (ExportPctChangeColumns)
+                {
+                    values.AddRange(new[]
+                    {
+                        FormatDecimal(data.POCPrice),
+                        FormatDecimalNullable(data.POCPriceChgPct),
+                        FormatDecimal(data.POCVolume),
+                        FormatDecimalNullable(data.POCVolumeChgPct)
+                    });
+                }
+                else
+                {
+                    values.AddRange(new[]
+                    {
+                        FormatDecimal(data.POCPrice),
+                        FormatDecimal(data.POCVolume)
+                    });
+                }
             }
 
             if (ExportValueArea)
             {
-                values.AddRange(new[] 
-                { 
-                    FormatDecimal(data.VAH), 
-                    FormatDecimal(data.VAL), 
+                values.AddRange(new[]
+                {
+                    FormatDecimal(data.VAH),
+                    FormatDecimal(data.VAL),
                     FormatDecimal(data.VWAP)
                 });
             }
 
             if (ExportMaxDeltaInfo)
             {
-                values.AddRange(new[] 
-                { 
-                    FormatDecimal(data.MaxPosDeltaPrice),
-                    FormatDecimalNullable(data.MaxPosDeltaPriceChgPct),
-                    FormatDecimal(data.MaxPosDeltaVolume),
-                    FormatDecimalNullable(data.MaxPosDeltaVolumeChgPct),
-                    FormatDecimal(data.MaxNegDeltaPrice),
-                    FormatDecimalNullable(data.MaxNegDeltaPriceChgPct),
-                    FormatDecimal(data.MaxNegDeltaVolume),
-                    FormatDecimalNullable(data.MaxNegDeltaVolumeChgPct)
-                });
+                if (ExportPctChangeColumns)
+                {
+                    values.AddRange(new[]
+                    {
+                        FormatDecimal(data.MaxPosDeltaPrice),
+                        FormatDecimalNullable(data.MaxPosDeltaPriceChgPct),
+                        FormatDecimal(data.MaxPosDeltaVolume),
+                        FormatDecimalNullable(data.MaxPosDeltaVolumeChgPct),
+                        FormatDecimal(data.MaxNegDeltaPrice),
+                        FormatDecimalNullable(data.MaxNegDeltaPriceChgPct),
+                        FormatDecimal(data.MaxNegDeltaVolume),
+                        FormatDecimalNullable(data.MaxNegDeltaVolumeChgPct)
+                    });
+                }
+                else
+                {
+                    values.AddRange(new[]
+                    {
+                        FormatDecimal(data.MaxPosDeltaPrice),
+                        FormatDecimal(data.MaxPosDeltaVolume),
+                        FormatDecimal(data.MaxNegDeltaPrice),
+                        FormatDecimal(data.MaxNegDeltaVolume)
+                    });
+                }
             }
 
             return string.Join(",", values);
