@@ -15,12 +15,15 @@ using ATAS.Indicators.Drawing;
 using OFT.Attributes;
 using OFT.Localization;
 using OFT.Rendering.Context;
+using OFT.Rendering.Settings;
 using OFT.Rendering.Tools;
 
 using DrawingColor = System.Drawing.Color;
+using RenderControlMouseButtons = OFT.Rendering.Control.RenderControlMouseButtons;
+using RenderControlMouseEventArgs = OFT.Rendering.Control.RenderControlMouseEventArgs;
 
 /// <summary>
-/// 在最新 BAR 右侧按价格显示加单/撤单/被吃单流水（基于 MBO + 成交匹配）。
+/// 在最新 BAR 右侧按价格显示加单/撤单流水（基于 MBO）。
 /// </summary>
 [DisplayName("Price Level OrderFlow Ladder / 价位撤加吃统计")]
 [Category(IndicatorCategories.Other)]
@@ -46,11 +49,16 @@ public class PriceLevelOrderFlowLadder : Indicator
     private DrawingColor _priceTextColor = DrawingColor.FromArgb(255, 240, 240, 240);
     private DrawingColor _addColor = DrawingColor.FromArgb(255, 90, 200, 120);
     private DrawingColor _cancelColor = DrawingColor.FromArgb(255, 255, 160, 80);
-    private DrawingColor _execColor = DrawingColor.FromArgb(255, 105, 160, 255);
     private DrawingColor _bgColor = DrawingColor.FromArgb(170, 20, 20, 20);
+    private DrawingColor _buttonBgColor = DrawingColor.FromArgb(220, 55, 55, 55);
+    private DrawingColor _buttonTextColor = DrawingColor.FromArgb(255, 230, 230, 230);
+    private DrawingColor _buttonBorderColor = DrawingColor.FromArgb(255, 120, 120, 120);
 
     private RenderFont _headerFont = new("Consolas", 12);
     private RenderFont _rowFont = new("Consolas", 11);
+    private RenderFont _buttonFont = new("Consolas", 10);
+    private bool _clearHistoryNow;
+    private Rectangle _clearButtonRect = Rectangle.Empty;
 
     public PriceLevelOrderFlowLadder()
         : base(false)
@@ -74,16 +82,34 @@ public class PriceLevelOrderFlowLadder : Indicator
     [Range(10, 800)]
     public int ColumnOffsetPx { get; set; } = 200;
 
-    [Display(Name = "Executed match ms / 吃单匹配毫秒", GroupName = "Settings / 设置", Order = 50)]
-    [Range(5, 500)]
-    public int ExecMatchMilliseconds { get; set; } = 60;
-
     [Display(Name = "Mask max width px / 遮罩最大宽度像素", GroupName = "Settings / 设置", Order = 60)]
     [Range(120, 2400)]
     public int MaskMaxWidthPx { get; set; } = 700;
 
     [Display(Name = "Show title / 显示标题", GroupName = "Visualization / 可视化", Order = 100)]
     public bool ShowTitle { get; set; } = true;
+
+    [Display(Name = "Show clear button / 显示清空按钮", GroupName = "Visualization / 可视化", Order = 105)]
+    public bool ShowClearButton { get; set; } = true;
+
+    [Display(Name = "Clear history now / 一键清空历史", GroupName = "Visualization / 可视化", Order = 110)]
+    public bool ClearHistoryNow
+    {
+        get => _clearHistoryNow;
+        set
+        {
+            if (!_clearHistoryNow && value)
+            {
+                ClearHistoryState();
+                _clearHistoryNow = false;
+                RaisePropertyChanged(nameof(ClearHistoryNow));
+                RedrawChart();
+                return;
+            }
+
+            _clearHistoryNow = value;
+        }
+    }
 
     [Display(Name = "Header color / 标题颜色", GroupName = "Colors / 颜色", Order = 200)]
     public DrawingColor HeaderColor
@@ -113,18 +139,18 @@ public class PriceLevelOrderFlowLadder : Indicator
         set => _cancelColor = value;
     }
 
-    [Display(Name = "Executed color / 吃单颜色", GroupName = "Colors / 颜色", Order = 240)]
-    public DrawingColor ExecutedColor
-    {
-        get => _execColor;
-        set => _execColor = value;
-    }
-
     [Display(Name = "Background color / 背景色", GroupName = "Colors / 颜色", Order = 250)]
     public DrawingColor BackgroundColor
     {
         get => _bgColor;
         set => _bgColor = value;
+    }
+
+    [Display(Name = "Button background / 按钮背景色", GroupName = "Colors / 颜色", Order = 260)]
+    public DrawingColor ButtonBackgroundColor
+    {
+        get => _buttonBgColor;
+        set => _buttonBgColor = value;
     }
 
     protected override void OnInitialize()
@@ -141,13 +167,6 @@ public class PriceLevelOrderFlowLadder : Indicator
     protected override void OnNewTrade(MarketDataArg trade)
     {
         base.OnNewTrade(trade);
-
-        var now = DateTime.UtcNow;
-        lock (_sync)
-        {
-            ApplyTradeToPending(trade.Price, trade.Volume, now);
-            PrunePendingReductions(now);
-        }
     }
 
     protected override void OnMarketByOrdersChanged(IEnumerable<MarketByOrder> values)
@@ -202,7 +221,7 @@ public class PriceLevelOrderFlowLadder : Indicator
 
         var latestBarX = ChartInfo.GetXByBar(CurrentBar - 1);
         var startX = latestBarX + ColumnOffsetPx;
-        var header = "Price | Flow(+/-/x)   (从左到右=从新到旧)";
+        var header = "Price | Flow(+/-)   (从左到右=从新到旧)";
         var headerSize = context.MeasureString(header, _headerFont);
         var rowHeight = Math.Max(14, context.MeasureString("12345", _rowFont).Height + 2);
 
@@ -225,6 +244,27 @@ public class PriceLevelOrderFlowLadder : Indicator
                     LineAlignment = StringAlignment.Near
                 });
             currentY += titleHeight;
+        }
+
+        _clearButtonRect = Rectangle.Empty;
+        if (ShowClearButton)
+        {
+            var buttonText = "清空";
+            var btnTextSize = context.MeasureString(buttonText, _buttonFont);
+            var buttonWidth = Math.Max(44, btnTextSize.Width + 14);
+            var buttonHeight = Math.Max(18, btnTextSize.Height + 6);
+            var buttonX = startX + width - buttonWidth - 6;
+            var buttonY = topY + 2;
+            _clearButtonRect = new Rectangle(buttonX, buttonY, buttonWidth, buttonHeight);
+
+            context.FillRectangle(_buttonBgColor, _clearButtonRect);
+            context.DrawRectangle(new RenderPen(_buttonBorderColor), _clearButtonRect);
+            context.DrawString(buttonText, _buttonFont, _buttonTextColor, _clearButtonRect,
+                new RenderStringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center
+                });
         }
 
         var maxPriceWidth = 0;
@@ -269,7 +309,6 @@ public class PriceLevelOrderFlowLadder : Indicator
                 {
                     EventType.Add => _addColor,
                     EventType.Cancel => _cancelColor,
-                    EventType.Executed => _execColor,
                     _ => _priceTextColor
                 };
 
@@ -279,6 +318,29 @@ public class PriceLevelOrderFlowLadder : Indicator
                 x += tokenSize.Width + 6;
             }
         }
+    }
+
+    public override bool ProcessMouseUp(RenderControlMouseEventArgs e)
+    {
+        return TryHandleClearButtonClick(e);
+    }
+
+    public override bool ProcessMouseDown(RenderControlMouseEventArgs e)
+    {
+        return TryHandleClearButtonClick(e);
+    }
+
+    public override bool ProcessMouseClick(RenderControlMouseEventArgs e)
+    {
+        return TryHandleClearButtonClick(e);
+    }
+
+    public override OFT.Rendering.StdCursor GetCursor(RenderControlMouseEventArgs e)
+    {
+        if (ShowClearButton && IsPointInsideRectangle(_clearButtonRect, e.Location))
+            return OFT.Rendering.StdCursor.Hand;
+
+        return OFT.Rendering.StdCursor.NULL;
     }
 
     private async Task SubscribeMboAsync()
@@ -374,44 +436,6 @@ public class PriceLevelOrderFlowLadder : Indicator
         q.Enqueue(new PendingReduction(NextEventId(), eventTime, vol));
     }
 
-    private void ApplyTradeToPending(decimal price, decimal tradeVolume, DateTime tradeTime)
-    {
-        if (tradeVolume <= 0)
-            return;
-
-        if (!_pendingReductionsByPrice.TryGetValue(price, out var pending) || pending.Count == 0)
-            return;
-
-        var maxLag = TimeSpan.FromMilliseconds(ExecMatchMilliseconds);
-        PrunePendingQueue(price, pending, tradeTime, maxLag);
-
-        var remainingTrade = tradeVolume;
-        while (pending.Count > 0 && remainingTrade > 0)
-        {
-            var p = pending.Peek();
-            if (tradeTime - p.Time > maxLag)
-            {
-                pending.Dequeue();
-                RegisterCancel(price, p.Volume, p.Time);
-                continue;
-            }
-
-            var take = Math.Min(remainingTrade, p.Volume);
-            if (take > 0)
-                RegisterExec(price, take, tradeTime);
-
-            remainingTrade -= take;
-
-            var left = p.Volume - take;
-            pending.Dequeue();
-            if (left > 0)
-                pending.Enqueue(new PendingReduction(p.Id, p.Time, left));
-        }
-
-        if (pending.Count == 0)
-            _pendingReductionsByPrice.Remove(price);
-    }
-
     private void RegisterAdd(decimal price, decimal vol, DateTime eventTime)
     {
         if (vol <= 0)
@@ -424,13 +448,6 @@ public class PriceLevelOrderFlowLadder : Indicator
         if (vol <= 0)
             return;
         AddEvent(new AggregatedEvent(NextEventId(), eventTime, price, EventType.Cancel, vol));
-    }
-
-    private void RegisterExec(decimal price, decimal vol, DateTime eventTime)
-    {
-        if (vol <= 0)
-            return;
-        AddEvent(new AggregatedEvent(NextEventId(), eventTime, price, EventType.Executed, vol));
     }
 
     private void AddEvent(AggregatedEvent e)
@@ -447,7 +464,7 @@ public class PriceLevelOrderFlowLadder : Indicator
         if (_pendingReductionsByPrice.Count == 0)
             return;
 
-        var maxLag = TimeSpan.FromMilliseconds(ExecMatchMilliseconds);
+        var maxLag = TimeSpan.Zero;
         var emptyPrices = new List<decimal>();
         foreach (var kv in _pendingReductionsByPrice)
         {
@@ -463,7 +480,7 @@ public class PriceLevelOrderFlowLadder : Indicator
 
     private void PrunePendingQueue(decimal price, Queue<PendingReduction> q, DateTime now, TimeSpan maxLag)
     {
-        while (q.Count > 0 && now - q.Peek().Time > maxLag)
+        while (q.Count > 0 && now - q.Peek().Time >= maxLag)
         {
             var p = q.Dequeue();
             RegisterCancel(price, p.Volume, p.Time);
@@ -482,9 +499,6 @@ public class PriceLevelOrderFlowLadder : Indicator
                 break;
             case EventType.Cancel:
                 stats.CancelVolume += delta;
-                break;
-            case EventType.Executed:
-                stats.ExecutedVolume += delta;
                 break;
         }
 
@@ -526,7 +540,6 @@ public class PriceLevelOrderFlowLadder : Indicator
         {
             EventType.Add => $"+{v}",
             EventType.Cancel => $"-{v}",
-            EventType.Executed => $"x{v}",
             _ => v
         };
     }
@@ -539,11 +552,48 @@ public class PriceLevelOrderFlowLadder : Indicator
         return Math.Abs(volume) >= MinVolumeFilter;
     }
 
+    private bool TryHandleClearButtonClick(RenderControlMouseEventArgs e)
+    {
+        if (!ShowClearButton)
+            return false;
+
+        if (_clearButtonRect == Rectangle.Empty)
+            return false;
+
+        if (e.Button != RenderControlMouseButtons.Left)
+            return false;
+
+        if (!IsPointInsideRectangle(_clearButtonRect, e.Location))
+            return false;
+
+        ClearHistoryState();
+        RedrawChart();
+        return true;
+    }
+
+    private static bool IsPointInsideRectangle(Rectangle rectangle, Point point)
+    {
+        return point.X >= rectangle.X
+            && point.X <= rectangle.X + rectangle.Width
+            && point.Y >= rectangle.Y
+            && point.Y <= rectangle.Y + rectangle.Height;
+    }
+
+    private void ClearHistoryState()
+    {
+        lock (_sync)
+        {
+            _activeOrders.Clear();
+            _statsByPrice.Clear();
+            _tapeByPrice.Clear();
+            _pendingReductionsByPrice.Clear();
+        }
+    }
+
     private enum EventType
     {
         Add,
-        Cancel,
-        Executed
+        Cancel
     }
 
     private readonly struct ActiveOrder
@@ -612,8 +662,7 @@ public class PriceLevelOrderFlowLadder : Indicator
     {
         public decimal AddVolume { get; set; }
         public decimal CancelVolume { get; set; }
-        public decimal ExecutedVolume { get; set; }
-        public decimal Total => AddVolume + CancelVolume + ExecutedVolume;
+        public decimal Total => AddVolume + CancelVolume;
     }
 
     private readonly struct RenderRow

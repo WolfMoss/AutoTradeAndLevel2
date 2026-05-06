@@ -45,8 +45,24 @@
       <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Localization.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="OFT.Controls">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Controls.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Platform.Core">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Platform.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Platform">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Platform.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="OFT.Rendering">
       <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Rendering.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Rendering.Wpf">
+      <HintPath>C:\Program Files (x86)\ATAS Platform\OFT.Rendering.Wpf.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="OFT.Attributes">
