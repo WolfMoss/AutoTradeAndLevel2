@@ -46,9 +46,34 @@ namespace ATASOrderFlowExporter
         // 日志相关字段
         private readonly object _logLock = new object();
 
+        // SQLite 相关字段
+        private SqliteBarStore _sqliteStore;
+        private bool _sqliteInitWarned;
+
+        // bar_closed 推送：跳过图表首次加载时的假过渡
+        private bool _formingBarSeen;
+
         #endregion
 
         #region 参数设置
+
+        /// <summary>
+        /// 是否导出到 SQLite（推荐：Python 侧读库，避免 CSV 文件锁）
+        /// </summary>
+        [Display(Name = "启用SQLite导出", GroupName = "SQLite设置", Order = 5)]
+        public bool EnableSqliteExport { get; set; } = true;
+
+        /// <summary>
+        /// SQLite 数据库路径
+        /// </summary>
+        [Display(Name = "SQLite数据库路径", GroupName = "SQLite设置", Order = 6)]
+        public string SqliteExportFilePath { get; set; } = @"D:\ATASData\OrderFlowData.db";
+
+        /// <summary>
+        /// 是否导出 CSV（关闭后仅写 SQLite，减少磁盘 IO）
+        /// </summary>
+        [Display(Name = "启用CSV导出", GroupName = "导出设置", Order = 9)]
+        public bool EnableCsvExport { get; set; } = false;
 
         /// <summary>
         /// CSV文件保存路径 (主数据)
@@ -66,7 +91,7 @@ namespace ATASOrderFlowExporter
         /// 是否导出Footprint详细数据（每个价格层级的Bid/Ask）
         /// </summary>
         [Display(Name = "导出Footprint详情", GroupName = "导出设置", Order = 20)]
-        public bool ExportFootprintDetails { get; set; } = true;
+        public bool ExportFootprintDetails { get; set; } = false;
 
         /// <summary>
         /// 是否每次启动时清空文件
@@ -102,7 +127,7 @@ namespace ATASOrderFlowExporter
         /// 是否计算并导出相对上一根K线的涨跌百分比列（CloseChgPct、VolumeChgPct、DeltaChgPct 等 *ChgPct 列）
         /// </summary>
         [Display(Name = "导出Pct变化列", GroupName = "数据选项", Order = 75)]
-        public bool ExportPctChangeColumns { get; set; } = false;
+        public bool ExportPctChangeColumns { get; set; } = true;
 
         /// <summary>
         /// WebSocket服务端口
@@ -115,6 +140,18 @@ namespace ATASOrderFlowExporter
         /// </summary>
         [Display(Name = "启用WebSocket服务", GroupName = "WebSocket设置", Order = 81)]
         public bool EnableWebSocket { get; set; } = true;
+
+        /// <summary>
+        /// BAR 收盘时推送 bar_closed 事件（Python 可事件驱动读 SQLite）
+        /// </summary>
+        [Display(Name = "推送BAR收盘事件", GroupName = "WebSocket设置", Order = 82)]
+        public bool EnableBarClosedWebSocket { get; set; } = true;
+
+        /// <summary>
+        /// 是否通过 WebSocket 推送逐笔 Tick（无 event 字段；Python bar_closed 模式可关闭以减少流量）
+        /// </summary>
+        [Display(Name = "推送Tick数据", GroupName = "WebSocket设置", Order = 83)]
+        public bool EnableTickWebSocket { get; set; } = false;
 
         /// <summary>
         /// 日志文件路径
@@ -155,8 +192,9 @@ namespace ATASOrderFlowExporter
             _lastExportedBar = -1;
             _mainLastBarOffset = 0;
             _fpLastBarOffset = 0;
+            _formingBarSeen = false;
 
-            if (ClearOnStart)
+            if (ClearOnStart && EnableCsvExport)
             {
                 try
                 {
@@ -172,6 +210,21 @@ namespace ATASOrderFlowExporter
                 catch (Exception ex)
                 {
                     AddInfoLog($"清空文件失败: {ex.Message}");
+                }
+            }
+
+            if (EnableSqliteExport)
+            {
+                try
+                {
+                    _sqliteStore?.Dispose();
+                    _sqliteStore = new SqliteBarStore(SqliteExportFilePath);
+                    _sqliteStore.EnsureReady(ClearOnStart);
+                }
+                catch (Exception ex)
+                {
+                    var detail = ex.InnerException != null ? $"{ex.Message} | Inner: {ex.InnerException.Message}" : ex.Message;
+                    AddInfoLog($"初始化SQLite失败: {detail}");
                 }
             }
 
@@ -212,6 +265,7 @@ namespace ATASOrderFlowExporter
 
             try
             {
+                var previousExportedBar = _lastExportedBar;
                 var candle = GetCandle(bar);
                 var data = ExtractOrderFlowData(bar, candle);
                 if (bar > 0 && ExportPctChangeColumns)
@@ -219,7 +273,14 @@ namespace ATASOrderFlowExporter
                     var prevCandle = GetCandle(bar - 1);
                     ComputeChangePercentages(data, candle, prevCandle);
                 }
-                ExportDataToCSV(data);
+
+                if (EnableCsvExport)
+                {
+                    ExportDataToCSV(data);
+                }
+
+                ExportDataToSqlite(data);
+                TryBroadcastBarClosed(bar, previousExportedBar, data);
 
                 _lastExportedBar = bar;
                 _lastExportedSymbol = InstrumentInfo?.Instrument ?? string.Empty;
@@ -417,6 +478,104 @@ namespace ATASOrderFlowExporter
             catch (Exception ex)
             {
                 AddInfoLog($"创建目录失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 新 forming BAR 出现时，推送上一根已完成 BAR 的 bar_closed 事件
+        /// </summary>
+        private void TryBroadcastBarClosed(int bar, int previousExportedBar, OrderFlowData formingData)
+        {
+            if (!EnableWebSocket || !EnableBarClosedWebSocket)
+            {
+                if (bar == CurrentBar - 1)
+                {
+                    _formingBarSeen = true;
+                }
+                return;
+            }
+
+            var isFormingBar = bar == CurrentBar - 1;
+            var isNewFormingTransition = isFormingBar
+                && bar > previousExportedBar
+                && previousExportedBar >= 0
+                && previousExportedBar == bar - 1;
+
+            if (isNewFormingTransition && _formingBarSeen)
+            {
+                try
+                {
+                    var completedCandle = GetCandle(previousExportedBar);
+                    var completedData = ExtractOrderFlowData(previousExportedBar, completedCandle);
+                    if (previousExportedBar > 0 && ExportPctChangeColumns)
+                    {
+                        var prevCandle = GetCandle(previousExportedBar - 1);
+                        ComputeChangePercentages(completedData, completedCandle, prevCandle);
+                    }
+                    BroadcastBarClosed(completedData, formingData);
+                }
+                catch (Exception ex)
+                {
+                    AddInfoLog($"推送bar_closed失败: {ex.Message}");
+                }
+            }
+
+            if (isFormingBar)
+            {
+                _formingBarSeen = true;
+            }
+        }
+
+        /// <summary>
+        /// 推送 bar_closed 到 WebSocket 客户端
+        /// </summary>
+        private void BroadcastBarClosed(OrderFlowData completed, OrderFlowData forming)
+        {
+            var payload = new BarClosedEvent
+            {
+                Symbol = completed.Symbol,
+                BarIndex = completed.BarIndex,
+                Time = completed.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                FormingBarIndex = forming.BarIndex,
+                FormingBarTime = forming.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                Close = completed.Close,
+                Volume = completed.Volume,
+                Delta = completed.Delta
+            };
+
+            var json = JsonConvert.SerializeObject(payload, Formatting.None);
+            AddInfoLog($"推送bar_closed: {json}");
+            BroadcastToWebSocketClients(json);
+        }
+
+        /// <summary>
+        /// 将 BAR 数据 UPSERT 到 SQLite
+        /// </summary>
+        private void ExportDataToSqlite(OrderFlowData data)
+        {
+            if (!EnableSqliteExport)
+            {
+                return;
+            }
+
+            if (_sqliteStore == null)
+            {
+                if (!_sqliteInitWarned)
+                {
+                    AddInfoLog("SQLite未初始化，跳过写入。请将 Microsoft.Data.Sqlite 相关 DLL 部署到 ATAS Indicators 目录后重启 ATAS。");
+                    _sqliteInitWarned = true;
+                }
+                return;
+            }
+
+            try
+            {
+                _sqliteStore.UpsertBar(data);
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? $"{ex.Message} | Inner: {ex.InnerException.Message}" : ex.Message;
+                AddInfoLog($"写入SQLite失败: {detail}");
             }
         }
 
@@ -1053,10 +1212,9 @@ namespace ATASOrderFlowExporter
         {
             try
             {
-                if (arg == null)
+                if (arg == null || !EnableWebSocket || !EnableTickWebSocket)
                     return;
 
-                // 创建Tick数据对象
                 var tickData = new TickData
                 {
                     Symbol = InstrumentInfo?.Instrument ?? "Unknown",
@@ -1066,10 +1224,7 @@ namespace ATASOrderFlowExporter
                     Direction = arg.Direction.ToString() ?? "Unknown"
                 };
 
-                // 序列化为JSON
                 var jsonData = JsonConvert.SerializeObject(tickData, Formatting.None);
-                AddInfoLog($"处理Tick数据成功: {jsonData}");
-                // 推送给所有WebSocket客户端
                 BroadcastToWebSocketClients(jsonData);
             }
             catch (Exception ex)
@@ -1227,6 +1382,24 @@ namespace ATASOrderFlowExporter
         public decimal Ask { get; set; }
         public decimal Delta { get; set; }
         public decimal Ticks { get; set; }
+    }
+
+    /// <summary>
+    /// BAR 收盘 WebSocket 事件
+    /// </summary>
+    public class BarClosedEvent
+    {
+        [JsonProperty("event")]
+        public string Event { get; set; } = "bar_closed";
+
+        public string Symbol { get; set; }
+        public int BarIndex { get; set; }
+        public string Time { get; set; }
+        public int FormingBarIndex { get; set; }
+        public string FormingBarTime { get; set; }
+        public decimal Close { get; set; }
+        public decimal Volume { get; set; }
+        public decimal Delta { get; set; }
     }
 
     /// <summary>

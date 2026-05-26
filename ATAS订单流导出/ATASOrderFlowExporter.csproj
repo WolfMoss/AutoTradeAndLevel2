@@ -16,6 +16,7 @@
     <!-- ATAS输出目录 -->
     <OutputPath>bin\$(Configuration)\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <!-- ATAS Platform引用 -->
@@ -44,13 +45,24 @@
 
   <!-- 仅用于开发时的调试 -->
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="9.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_winsqlite3" Version="2.1.10" />
     <PackageReference Include="System.ComponentModel.Annotations" Version="5.0.0" />
   </ItemGroup>
 
-  <!-- 发布时复制到ATAS指标目录 -->
+  <!-- 发布时复制到ATAS指标目录（含 SQLite 依赖） -->
   <Target Name="CopyToATAS" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <ATASIndicatorsDir>C:\Users\Administrator\AppData\Roaming\ATAS\Indicators\</ATASIndicatorsDir>
+    </PropertyGroup>
     <Message Text="正在复制到ATAS指标目录..." Importance="high" />
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="C:\Users\Administrator\AppData\Roaming\ATAS\Indicators\" SkipUnchangedFiles="true" />
+    <Delete Files="$(ATASIndicatorsDir)SQLitePCLRaw.provider.e_sqlite3.dll" Condition="Exists('$(ATASIndicatorsDir)SQLitePCLRaw.provider.e_sqlite3.dll')" />
+    <Delete Files="$(ATASIndicatorsDir)runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(ATASIndicatorsDir)runtimes\win-x64\native\e_sqlite3.dll')" />
+    <ItemGroup>
+      <ATASDeployFiles Include="$(OutputPath)*.dll" />
+      <ATASDeployFiles Include="$(OutputPath)*.deps.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ATASDeployFiles)" DestinationFolder="$(ATASIndicatorsDir)" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>
