@@ -13,7 +13,7 @@ namespace ATASOrderFlowExporter
         private readonly object _lock = new object();
         private readonly string _dbPath;
         private SqliteConnection _connection;
-        private bool _initialized;
+        private bool _schemaReady;
 
         public SqliteBarStore(string dbPath)
         {
@@ -35,16 +35,24 @@ namespace ATASOrderFlowExporter
                 {
                     CloseConnection();
                     File.Delete(_dbPath);
-                    _initialized = false;
+                    _schemaReady = false;
                 }
 
-                OpenConnection();
-                if (!_initialized)
-                {
-                    ApplySchema();
-                    _initialized = true;
-                }
+                EnsureConnectionReady();
             }
+        }
+
+        private void EnsureConnectionReady()
+        {
+            OpenConnection();
+            if (_schemaReady)
+            {
+                return;
+            }
+
+            ApplySchema();
+            ApplyMigrations();
+            _schemaReady = true;
         }
 
         public void UpsertBar(OrderFlowData data)
@@ -56,7 +64,7 @@ namespace ATASOrderFlowExporter
 
             lock (_lock)
             {
-                OpenConnection();
+                EnsureConnectionReady();
                 using var tx = _connection.BeginTransaction();
                 using (var cmd = _connection.CreateCommand())
                 {
@@ -176,7 +184,7 @@ ON CONFLICT(Symbol) DO UPDATE SET
 
             lock (_lock)
             {
-                OpenConnection();
+                EnsureConnectionReady();
                 using var tx = _connection.BeginTransaction();
 
                 using (var deleteCmd = _connection.CreateCommand())
@@ -248,6 +256,7 @@ INSERT INTO order_book_levels (
 
             _connection.Dispose();
             _connection = null;
+            _schemaReady = false;
         }
 
         private void ApplySchema()
@@ -357,11 +366,20 @@ CREATE TABLE IF NOT EXISTS trade_state (
 );
 ";
             cmd.ExecuteNonQuery();
+        }
+
+        private void ApplyMigrations()
+        {
             EnsureColumn("bars", "MaxBarAcceleration", "REAL");
         }
 
         private void EnsureColumn(string table, string column, string type)
         {
+            if (!TableExists(table))
+            {
+                return;
+            }
+
             using var check = _connection.CreateCommand();
             check.CommandText = $"PRAGMA table_info({table});";
             using var reader = check.ExecuteReader();
@@ -376,6 +394,14 @@ CREATE TABLE IF NOT EXISTS trade_state (
             using var alter = _connection.CreateCommand();
             alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {type};";
             alter.ExecuteNonQuery();
+        }
+
+        private bool TableExists(string table)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1;";
+            cmd.Parameters.AddWithValue("$name", table);
+            return cmd.ExecuteScalar() != null;
         }
 
         private static void BindBarParameters(SqliteCommand cmd, OrderFlowData data)
