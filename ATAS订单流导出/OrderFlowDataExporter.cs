@@ -33,8 +33,11 @@ namespace ATASOrderFlowExporter
         private int _lastExportedBar = -1;
         private bool _mainHeaderWritten = false;
         private bool _footprintHeaderWritten = false;
+        private bool _orderBookHeaderWritten = false;
         private long _mainLastBarOffset = 0;
         private long _fpLastBarOffset = 0;
+        private long _obLastBarOffset = 0;
+        private int _lastOrderBookExportedBar = -1;
 
         // WebSocket相关字段
         private HttpListener _httpListener;
@@ -52,6 +55,15 @@ namespace ATASOrderFlowExporter
 
         // bar_closed 推送：跳过图表首次加载时的假过渡
         private bool _formingBarSeen;
+
+        // Tick 价格加速度（每根 bar 记录 |a| 最大时的带符号加速度）
+        private readonly Queue<(decimal Price, DateTime Time)> _tickHistory = new Queue<(decimal Price, DateTime Time)>();
+        private readonly Dictionary<int, decimal> _barMaxAccelerations = new Dictionary<int, decimal>();
+        private decimal _currentVelocity;
+        private decimal _currentAcceleration;
+        private decimal _lastVelocity;
+        private DateTime _lastVelocitySampleUtc;
+        private bool _hasVelocitySample;
 
         #endregion
 
@@ -88,10 +100,36 @@ namespace ATASOrderFlowExporter
         public string FootprintExportFilePath { get; set; } = @"D:\ATASData\OrderFlowData_Footprint.csv";
 
         /// <summary>
+        /// CSV文件保存路径 (订单簿数据)
+        /// </summary>
+        [Display(Name = "订单簿导出路径", GroupName = "导出设置", Order = 12)]
+        public string OrderBookExportFilePath { get; set; } = @"D:\ATASData\OrderFlowData_OrderBook.csv";
+
+        /// <summary>
         /// 是否导出Footprint详细数据（每个价格层级的Bid/Ask）
         /// </summary>
         [Display(Name = "导出Footprint详情", GroupName = "导出设置", Order = 20)]
         public bool ExportFootprintDetails { get; set; } = false;
+
+        /// <summary>
+        /// 是否在 BAR 收盘时导出订单簿快照（每个价位一行，关联 Symbol + BarIndex）
+        /// </summary>
+        [Display(Name = "收K导出订单簿", GroupName = "导出设置", Order = 21)]
+        public bool ExportOrderBookOnBarClose { get; set; } = true;
+
+        /// <summary>
+        /// 以收K收盘价为中心，上下各 N 个 tick 范围内的订单簿档位
+        /// </summary>
+        [Display(Name = "订单簿Tick范围", GroupName = "导出设置", Order = 22)]
+        [Range(1, 1000)]
+        public int OrderBookTickRange { get; set; } = 100;
+
+        /// <summary>
+        /// 订单簿档位最小挂单量（手数）
+        /// </summary>
+        [Display(Name = "订单簿最小手数", GroupName = "导出设置", Order = 23)]
+        [Range(1, 1000000000)]
+        public decimal OrderBookMinVolume { get; set; } = 10m;
 
         /// <summary>
         /// 是否每次启动时清空文件
@@ -128,6 +166,27 @@ namespace ATASOrderFlowExporter
         /// </summary>
         [Display(Name = "导出Pct变化列", GroupName = "数据选项", Order = 75)]
         public bool ExportPctChangeColumns { get; set; } = true;
+
+        /// <summary>
+        /// 是否导出每根 bar 内 Tick 价格加速度峰值（算法同 TickPriceAcceleration）
+        /// </summary>
+        [Display(Name = "导出Bar最大加速度", GroupName = "数据选项", Order = 76)]
+        public bool ExportBarAcceleration { get; set; } = true;
+
+        [Display(Name = "加速度时间窗口(毫秒)", GroupName = "数据选项", Order = 77,
+            Description = "估计速度 v=Δprice/Δtime 的滑动时间窗口")]
+        [Range(100, 60000)]
+        public int AccelerationWindowMilliseconds { get; set; } = 1000;
+
+        [Display(Name = "加速度最小时距(毫秒)", GroupName = "数据选项", Order = 78,
+            Description = "计算 dv/dt 时两次速度采样的最小时间间隔，避免 tick 过密产生尖峰")]
+        [Range(1, 500)]
+        public int AccelerationMinDtMilliseconds { get; set; } = 16;
+
+        [Display(Name = "加速度放大系数", GroupName = "数据选项", Order = 79,
+            Description = "导出值 = 原始加速度 × 系数，与 TickPriceAcceleration 显示一致")]
+        [Range(1, 10000)]
+        public int AccelerationMultiplier { get; set; } = 100;
 
         /// <summary>
         /// WebSocket服务端口
@@ -189,10 +248,14 @@ namespace ATASOrderFlowExporter
 
             _mainHeaderWritten = false;
             _footprintHeaderWritten = false;
+            _orderBookHeaderWritten = false;
             _lastExportedBar = -1;
+            _lastOrderBookExportedBar = -1;
             _mainLastBarOffset = 0;
             _fpLastBarOffset = 0;
+            _obLastBarOffset = 0;
             _formingBarSeen = false;
+            ResetAccelerationState();
 
             if (ClearOnStart && EnableCsvExport)
             {
@@ -205,6 +268,10 @@ namespace ATASOrderFlowExporter
                     if (File.Exists(FootprintExportFilePath))
                     {
                         File.Delete(FootprintExportFilePath);
+                    }
+                    if (File.Exists(OrderBookExportFilePath))
+                    {
+                        File.Delete(OrderBookExportFilePath);
                     }
                 }
                 catch (Exception ex)
@@ -245,6 +312,11 @@ namespace ATASOrderFlowExporter
         /// <param name="isNewBar">是否是新K线</param>
         protected override void OnCalculate(int bar, decimal value)
         {
+            if (bar == 0)
+            {
+                ResetAccelerationState();
+            }
+
             // 检查WebSocket服务状态是否变化
             if (_lastEnableWebSocketValue != EnableWebSocket)
             {
@@ -280,7 +352,7 @@ namespace ATASOrderFlowExporter
                 }
 
                 ExportDataToSqlite(data);
-                TryBroadcastBarClosed(bar, previousExportedBar, data);
+                TryHandleBarClosed(bar, previousExportedBar, data);
 
                 _lastExportedBar = bar;
                 _lastExportedSymbol = InstrumentInfo?.Instrument ?? string.Empty;
@@ -392,7 +464,90 @@ namespace ATASOrderFlowExporter
                 }
             }
 
+            if (ExportBarAcceleration && _barMaxAccelerations.TryGetValue(bar, out var maxAcceleration))
+            {
+                var multiplier = AccelerationMultiplier == 0 ? 1 : AccelerationMultiplier;
+                data.MaxBarAcceleration = maxAcceleration * multiplier;
+            }
+
             return data;
+        }
+
+        private void ResetAccelerationState()
+        {
+            _tickHistory.Clear();
+            _barMaxAccelerations.Clear();
+            _currentVelocity = 0;
+            _currentAcceleration = 0;
+            _lastVelocity = 0;
+            _hasVelocitySample = false;
+        }
+
+        /// <summary>
+        /// 基于 Tick 流更新当前 bar 的最大加速度（逻辑同 TickPriceAcceleration.OnNewTrade）
+        /// </summary>
+        private void UpdateBarAcceleration(MarketDataArg trade)
+        {
+            var currentTime = DateTime.UtcNow;
+            var currentPrice = trade.Price;
+
+            _tickHistory.Enqueue((currentPrice, currentTime));
+
+            var windowStart = currentTime.AddMilliseconds(-AccelerationWindowMilliseconds);
+            while (_tickHistory.Count > 0 && _tickHistory.Peek().Time < windowStart)
+            {
+                _tickHistory.Dequeue();
+            }
+
+            if (_tickHistory.Count >= 2)
+            {
+                var oldestTick = _tickHistory.Peek();
+                var timeSpanSeconds = (currentTime - oldestTick.Time).TotalSeconds;
+                if (timeSpanSeconds > 0)
+                {
+                    _currentVelocity = (currentPrice - oldestTick.Price) / (decimal)timeSpanSeconds;
+                }
+            }
+            else
+            {
+                _currentVelocity = 0;
+            }
+
+            var minDt = TimeSpan.FromMilliseconds(AccelerationMinDtMilliseconds);
+            if (!_hasVelocitySample)
+            {
+                _lastVelocity = _currentVelocity;
+                _lastVelocitySampleUtc = currentTime;
+                _hasVelocitySample = true;
+                _currentAcceleration = 0;
+            }
+            else if (currentTime - _lastVelocitySampleUtc >= minDt)
+            {
+                var dtSec = (currentTime - _lastVelocitySampleUtc).TotalSeconds;
+                if (dtSec > 0)
+                {
+                    _currentAcceleration = (_currentVelocity - _lastVelocity) / (decimal)dtSec;
+                }
+
+                _lastVelocity = _currentVelocity;
+                _lastVelocitySampleUtc = currentTime;
+            }
+
+            var currentBarIndex = CurrentBar - 1;
+            if (currentBarIndex < 0)
+            {
+                return;
+            }
+
+            if (!_barMaxAccelerations.TryGetValue(currentBarIndex, out var recorded))
+            {
+                recorded = 0;
+            }
+
+            if (Math.Abs(_currentAcceleration) > Math.Abs(recorded))
+            {
+                _barMaxAccelerations[currentBarIndex] = _currentAcceleration;
+            }
         }
 
         /// <summary>
@@ -474,6 +629,12 @@ namespace ATASOrderFlowExporter
                 {
                     Directory.CreateDirectory(fpDir);
                 }
+
+                var obDir = Path.GetDirectoryName(OrderBookExportFilePath);
+                if (!string.IsNullOrEmpty(obDir) && !Directory.Exists(obDir))
+                {
+                    Directory.CreateDirectory(obDir);
+                }
             }
             catch (Exception ex)
             {
@@ -482,19 +643,10 @@ namespace ATASOrderFlowExporter
         }
 
         /// <summary>
-        /// 新 forming BAR 出现时，推送上一根已完成 BAR 的 bar_closed 事件
+        /// 新 forming BAR 出现时：收K导出订单簿，并可选推送 bar_closed
         /// </summary>
-        private void TryBroadcastBarClosed(int bar, int previousExportedBar, OrderFlowData formingData)
+        private void TryHandleBarClosed(int bar, int previousExportedBar, OrderFlowData formingData)
         {
-            if (!EnableWebSocket || !EnableBarClosedWebSocket)
-            {
-                if (bar == CurrentBar - 1)
-                {
-                    _formingBarSeen = true;
-                }
-                return;
-            }
-
             var isFormingBar = bar == CurrentBar - 1;
             var isNewFormingTransition = isFormingBar
                 && bar > previousExportedBar
@@ -512,17 +664,155 @@ namespace ATASOrderFlowExporter
                         var prevCandle = GetCandle(previousExportedBar - 1);
                         ComputeChangePercentages(completedData, completedCandle, prevCandle);
                     }
-                    BroadcastBarClosed(completedData, formingData);
+
+                    if (ExportOrderBookOnBarClose)
+                    {
+                        completedData.OrderBookLevels = CaptureOrderBookLevels(completedCandle.Close);
+                        ExportOrderBookData(completedData);
+                    }
+
+                    if (EnableWebSocket && EnableBarClosedWebSocket)
+                    {
+                        BroadcastBarClosed(completedData, formingData);
+                    }
                 }
                 catch (Exception ex)
                 {
-                    AddInfoLog($"推送bar_closed失败: {ex.Message}");
+                    AddInfoLog($"处理收K事件失败 (Bar={previousExportedBar}): {ex.Message}");
                 }
             }
 
             if (isFormingBar)
             {
                 _formingBarSeen = true;
+            }
+        }
+
+        /// <summary>
+        /// 抓取当前 DOM 快照，过滤后作为已完成 BAR 的订单簿明细
+        /// </summary>
+        private List<OrderBookLevel> CaptureOrderBookLevels(decimal referencePrice)
+        {
+            var levels = new List<OrderBookLevel>();
+            var tickSize = InstrumentInfo?.TickSize ?? 0m;
+            if (tickSize <= 0m)
+            {
+                AddInfoLog("订单簿导出跳过：TickSize 无效");
+                return levels;
+            }
+
+            var minPrice = referencePrice - OrderBookTickRange * tickSize;
+            var maxPrice = referencePrice + OrderBookTickRange * tickSize;
+            var snapshot = MarketDepthInfo?.GetMarketDepthSnapshot();
+            if (snapshot == null)
+            {
+                return levels;
+            }
+
+            foreach (var depth in snapshot)
+            {
+                if (depth == null || depth.Volume < OrderBookMinVolume)
+                {
+                    continue;
+                }
+
+                if (depth.Price < minPrice || depth.Price > maxPrice)
+                {
+                    continue;
+                }
+
+                string side;
+                if (depth.IsBid)
+                {
+                    side = "Bid";
+                }
+                else if (depth.IsAsk)
+                {
+                    side = "Ask";
+                }
+                else
+                {
+                    continue;
+                }
+
+                var tickOffset = (int)Math.Round((depth.Price - referencePrice) / tickSize, MidpointRounding.AwayFromZero);
+                levels.Add(new OrderBookLevel
+                {
+                    Price = depth.Price,
+                    Side = side,
+                    Volume = depth.Volume,
+                    TickOffset = tickOffset
+                });
+            }
+
+            return levels
+                .OrderBy(l => l.Price)
+                .ThenBy(l => l.Side, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        /// <summary>
+        /// 导出订单簿明细（CSV + SQLite，关联 Symbol/BarIndex/Time）
+        /// </summary>
+        private void ExportOrderBookData(OrderFlowData data)
+        {
+            if (data?.OrderBookLevels == null || data.OrderBookLevels.Count == 0)
+            {
+                return;
+            }
+
+            if (EnableCsvExport)
+            {
+                ExportOrderBookToCsv(data);
+            }
+
+            ExportOrderBookToSqlite(data);
+        }
+
+        private void ExportOrderBookToCsv(OrderFlowData data)
+        {
+            lock (_fileLock)
+            {
+                try
+                {
+                    var sb = new StringBuilder();
+                    foreach (var level in data.OrderBookLevels)
+                    {
+                        sb.AppendLine(GetOrderBookCSVDataLine(data, level));
+                    }
+
+                    var content = sb.ToString().TrimEnd('\r', '\n');
+                    UpdateDetailFileContent(
+                        OrderBookExportFilePath,
+                        GetOrderBookCSVHeader(),
+                        content,
+                        data.BarIndex,
+                        ref _orderBookHeaderWritten,
+                        ref _obLastBarOffset,
+                        ref _lastOrderBookExportedBar);
+                }
+                catch (Exception ex)
+                {
+                    AddInfoLog($"写入订单簿CSV失败: {ex.Message}");
+                }
+            }
+        }
+
+        private void ExportOrderBookToSqlite(OrderFlowData data)
+        {
+            if (!EnableSqliteExport || _sqliteStore == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _sqliteStore.UpsertOrderBookLevels(data);
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? $"{ex.Message} | Inner: {ex.InnerException.Message}" : ex.Message;
+                AddInfoLog($"写入订单簿SQLite失败: {detail}");
             }
         }
 
@@ -717,6 +1007,107 @@ namespace ATASOrderFlowExporter
             }
         }
 
+        /// <summary>
+        /// 明细文件写入（Footprint/订单簿）：按各自 lastBarIndex 追加或覆盖
+        /// </summary>
+        private void UpdateDetailFileContent(
+            string path,
+            string header,
+            string content,
+            int barIndex,
+            ref bool headerWritten,
+            ref long lastBarOffset,
+            ref int lastDetailBarIndex)
+        {
+            using (var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
+            {
+                if (stream.Length == 0 || !headerWritten)
+                {
+                    stream.SetLength(0);
+                    using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true))
+                    {
+                        writer.WriteLine(header);
+                    }
+                    headerWritten = true;
+                    lastBarOffset = stream.Position;
+                }
+                else
+                {
+                    stream.Seek(0, SeekOrigin.Begin);
+                    string existingHeader;
+                    using (var reader = new StreamReader(stream, Encoding.UTF8, true, 1024, true))
+                    {
+                        existingHeader = reader.ReadLine();
+                    }
+
+                    if (existingHeader != header)
+                    {
+                        stream.Seek(0, SeekOrigin.Begin);
+                        var existingLines = new List<string>();
+                        using (var reader = new StreamReader(stream, Encoding.UTF8, true, 1024, true))
+                        {
+                            reader.ReadLine();
+                            string line;
+                            while ((line = reader.ReadLine()) != null)
+                            {
+                                existingLines.Add(line);
+                            }
+                        }
+
+                        if (barIndex == lastDetailBarIndex && existingLines.Count > 0)
+                        {
+                            existingLines.RemoveAt(existingLines.Count - 1);
+                        }
+
+                        stream.SetLength(0);
+                        stream.Seek(0, SeekOrigin.Begin);
+                        using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true))
+                        {
+                            writer.WriteLine(header);
+                            foreach (var line in existingLines)
+                            {
+                                writer.WriteLine(line);
+                            }
+                            writer.Write(content);
+                            writer.WriteLine();
+                        }
+
+                        headerWritten = true;
+                        lastBarOffset = Encoding.UTF8.GetByteCount(header + Environment.NewLine);
+                        foreach (var line in existingLines)
+                        {
+                            lastBarOffset += Encoding.UTF8.GetByteCount(line + Environment.NewLine);
+                        }
+                        lastDetailBarIndex = barIndex;
+                        return;
+                    }
+                }
+
+                if (barIndex > lastDetailBarIndex)
+                {
+                    stream.Seek(0, SeekOrigin.End);
+                    lastBarOffset = stream.Position;
+                    using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true))
+                    {
+                        writer.Write(content);
+                        writer.WriteLine();
+                    }
+                }
+                else if (barIndex == lastDetailBarIndex)
+                {
+                    stream.SetLength(lastBarOffset);
+                    stream.Seek(lastBarOffset, SeekOrigin.Begin);
+                    using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true))
+                    {
+                        writer.Write(content);
+                        writer.WriteLine();
+                    }
+                }
+
+                lastDetailBarIndex = barIndex;
+            }
+        }
+
 
         /// <summary>
         /// 获取主数据CSV表头
@@ -788,6 +1179,11 @@ namespace ATASOrderFlowExporter
                 }
             }
 
+            if (ExportBarAcceleration)
+            {
+                headers.Add("MaxBarAcceleration");
+            }
+
             return string.Join(",", headers);
         }
 
@@ -800,6 +1196,18 @@ namespace ATASOrderFlowExporter
             { 
                 "Symbol", "BarIndex", "Time",
                 "LevelPrice", "LevelVolume", "LevelBid", "LevelAsk", "LevelDelta", "LevelTicks" 
+            });
+        }
+
+        /// <summary>
+        /// 获取订单簿 CSV 表头
+        /// </summary>
+        private string GetOrderBookCSVHeader()
+        {
+            return string.Join(",", new[]
+            {
+                "Symbol", "BarIndex", "Time",
+                "LevelPrice", "Side", "LevelVolume", "TickOffset"
             });
         }
 
@@ -898,6 +1306,11 @@ namespace ATASOrderFlowExporter
                 }
             }
 
+            if (ExportBarAcceleration)
+            {
+                values.Add(FormatDecimal(data.MaxBarAcceleration));
+            }
+
             return string.Join(",", values);
         }
 
@@ -917,6 +1330,23 @@ namespace ATASOrderFlowExporter
                 FormatDecimal(level.Ask),
                 FormatDecimal(level.Delta),
                 FormatDecimal(level.Ticks)
+            });
+        }
+
+        /// <summary>
+        /// 获取订单簿 CSV 数据行
+        /// </summary>
+        private string GetOrderBookCSVDataLine(OrderFlowData data, OrderBookLevel level)
+        {
+            return string.Join(",", new[]
+            {
+                data.Symbol,
+                data.BarIndex.ToString(),
+                data.Time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                FormatDecimal(level.Price),
+                level.Side,
+                FormatDecimal(level.Volume),
+                level.TickOffset.ToString(CultureInfo.InvariantCulture)
             });
         }
 
@@ -1212,6 +1642,11 @@ namespace ATASOrderFlowExporter
         {
             try
             {
+                if (arg != null && ExportBarAcceleration)
+                {
+                    UpdateBarAcceleration(arg);
+                }
+
                 if (arg == null || !EnableWebSocket || !EnableTickWebSocket)
                     return;
 
@@ -1367,8 +1802,16 @@ namespace ATASOrderFlowExporter
         public decimal? MaxNegDeltaPriceChgPct { get; set; }
         public decimal? MaxNegDeltaVolumeChgPct { get; set; }
 
+        /// <summary>
+        /// 该 bar 内 Tick 价格加速度峰值（带符号，已乘放大系数）
+        /// </summary>
+        public decimal MaxBarAcceleration { get; set; }
+
         // Footprint详情
         public List<FootprintLevel> FootprintLevels { get; set; }
+
+        // 收K订单簿明细
+        public List<OrderBookLevel> OrderBookLevels { get; set; }
     }
 
     /// <summary>
@@ -1382,6 +1825,17 @@ namespace ATASOrderFlowExporter
         public decimal Ask { get; set; }
         public decimal Delta { get; set; }
         public decimal Ticks { get; set; }
+    }
+
+    /// <summary>
+    /// 收K订单簿价位数据
+    /// </summary>
+    public class OrderBookLevel
+    {
+        public decimal Price { get; set; }
+        public string Side { get; set; }
+        public decimal Volume { get; set; }
+        public int TickOffset { get; set; }
     }
 
     /// <summary>

@@ -74,6 +74,7 @@ INSERT INTO bars (
     POCPriceChgPct, POCVolumeChgPct,
     MaxPosDeltaPriceChgPct, MaxPosDeltaVolumeChgPct,
     MaxNegDeltaPriceChgPct, MaxNegDeltaVolumeChgPct,
+    MaxBarAcceleration,
     UpdatedAt
 ) VALUES (
     $symbol, $barIndex, $time, $lastTime, $hour,
@@ -87,6 +88,7 @@ INSERT INTO bars (
     $pocPriceChgPct, $pocVolumeChgPct,
     $maxPosDeltaPriceChgPct, $maxPosDeltaVolumeChgPct,
     $maxNegDeltaPriceChgPct, $maxNegDeltaVolumeChgPct,
+    $maxBarAcceleration,
     $updatedAt
 )
 ON CONFLICT(Symbol, BarIndex) DO UPDATE SET
@@ -131,6 +133,7 @@ ON CONFLICT(Symbol, BarIndex) DO UPDATE SET
     MaxPosDeltaVolumeChgPct = excluded.MaxPosDeltaVolumeChgPct,
     MaxNegDeltaPriceChgPct = excluded.MaxNegDeltaPriceChgPct,
     MaxNegDeltaVolumeChgPct = excluded.MaxNegDeltaVolumeChgPct,
+    MaxBarAcceleration = excluded.MaxBarAcceleration,
     UpdatedAt = excluded.UpdatedAt;
 ";
                     BindBarParameters(cmd, data);
@@ -153,6 +156,61 @@ ON CONFLICT(Symbol) DO UPDATE SET
                     meta.Parameters.AddWithValue("$time", FormatTime(data.Time));
                     meta.Parameters.AddWithValue("$updatedAt", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
                     meta.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+            }
+        }
+
+        public void UpsertOrderBookLevels(OrderFlowData data)
+        {
+            if (data == null)
+            {
+                throw new ArgumentNullException(nameof(data));
+            }
+
+            if (data.OrderBookLevels == null || data.OrderBookLevels.Count == 0)
+            {
+                return;
+            }
+
+            lock (_lock)
+            {
+                OpenConnection();
+                using var tx = _connection.BeginTransaction();
+
+                using (var deleteCmd = _connection.CreateCommand())
+                {
+                    deleteCmd.Transaction = tx;
+                    deleteCmd.CommandText = @"
+DELETE FROM order_book_levels
+WHERE Symbol = $symbol AND BarIndex = $barIndex;
+";
+                    deleteCmd.Parameters.AddWithValue("$symbol", data.Symbol ?? "Unknown");
+                    deleteCmd.Parameters.AddWithValue("$barIndex", data.BarIndex);
+                    deleteCmd.ExecuteNonQuery();
+                }
+
+                foreach (var level in data.OrderBookLevels)
+                {
+                    using var insertCmd = _connection.CreateCommand();
+                    insertCmd.Transaction = tx;
+                    insertCmd.CommandText = @"
+INSERT INTO order_book_levels (
+    Symbol, BarIndex, Time, LevelPrice, Side, LevelVolume, TickOffset, UpdatedAt
+) VALUES (
+    $symbol, $barIndex, $time, $levelPrice, $side, $levelVolume, $tickOffset, $updatedAt
+);
+";
+                    insertCmd.Parameters.AddWithValue("$symbol", data.Symbol ?? "Unknown");
+                    insertCmd.Parameters.AddWithValue("$barIndex", data.BarIndex);
+                    insertCmd.Parameters.AddWithValue("$time", FormatTime(data.Time));
+                    insertCmd.Parameters.AddWithValue("$levelPrice", (double)level.Price);
+                    insertCmd.Parameters.AddWithValue("$side", level.Side ?? string.Empty);
+                    insertCmd.Parameters.AddWithValue("$levelVolume", (double)level.Volume);
+                    insertCmd.Parameters.AddWithValue("$tickOffset", level.TickOffset);
+                    insertCmd.Parameters.AddWithValue("$updatedAt", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+                    insertCmd.ExecuteNonQuery();
                 }
 
                 tx.Commit();
@@ -243,12 +301,28 @@ CREATE TABLE IF NOT EXISTS bars (
     MaxPosDeltaVolumeChgPct     REAL,
     MaxNegDeltaPriceChgPct      REAL,
     MaxNegDeltaVolumeChgPct     REAL,
+    MaxBarAcceleration          REAL,
     UpdatedAt                   TEXT    NOT NULL,
     PRIMARY KEY (Symbol, BarIndex)
 );
 
 CREATE INDEX IF NOT EXISTS idx_bars_symbol_barindex ON bars (Symbol, BarIndex);
 CREATE INDEX IF NOT EXISTS idx_bars_symbol_time ON bars (Symbol, Time);
+
+CREATE TABLE IF NOT EXISTS order_book_levels (
+    Symbol          TEXT    NOT NULL,
+    BarIndex        INTEGER NOT NULL,
+    Time            TEXT    NOT NULL,
+    LevelPrice      REAL    NOT NULL,
+    Side            TEXT    NOT NULL,
+    LevelVolume     REAL    NOT NULL,
+    TickOffset      INTEGER NOT NULL,
+    UpdatedAt       TEXT    NOT NULL,
+    PRIMARY KEY (Symbol, BarIndex, LevelPrice, Side)
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_book_symbol_barindex ON order_book_levels (Symbol, BarIndex);
+CREATE INDEX IF NOT EXISTS idx_order_book_symbol_time ON order_book_levels (Symbol, Time);
 
 CREATE TABLE IF NOT EXISTS feed_meta (
     Symbol              TEXT PRIMARY KEY,
@@ -283,6 +357,25 @@ CREATE TABLE IF NOT EXISTS trade_state (
 );
 ";
             cmd.ExecuteNonQuery();
+            EnsureColumn("bars", "MaxBarAcceleration", "REAL");
+        }
+
+        private void EnsureColumn(string table, string column, string type)
+        {
+            using var check = _connection.CreateCommand();
+            check.CommandText = $"PRAGMA table_info({table});";
+            using var reader = check.ExecuteReader();
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
+            using var alter = _connection.CreateCommand();
+            alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {type};";
+            alter.ExecuteNonQuery();
         }
 
         private static void BindBarParameters(SqliteCommand cmd, OrderFlowData data)
@@ -330,6 +423,7 @@ CREATE TABLE IF NOT EXISTS trade_state (
             cmd.Parameters.AddWithValue("$maxPosDeltaVolumeChgPct", ToDbNullable(data.MaxPosDeltaVolumeChgPct));
             cmd.Parameters.AddWithValue("$maxNegDeltaPriceChgPct", ToDbNullable(data.MaxNegDeltaPriceChgPct));
             cmd.Parameters.AddWithValue("$maxNegDeltaVolumeChgPct", ToDbNullable(data.MaxNegDeltaVolumeChgPct));
+            cmd.Parameters.AddWithValue("$maxBarAcceleration", (double)data.MaxBarAcceleration);
             cmd.Parameters.AddWithValue("$updatedAt", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
         }
 
